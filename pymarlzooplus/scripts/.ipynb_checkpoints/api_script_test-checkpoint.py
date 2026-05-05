@@ -1,5 +1,6 @@
 # Import packages
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
+from pymarlzooplus.rl_video_recorder import RLVideoRecorder
 
 ##################################### API for fully cooperative tasks. ###################################
 ## 'n_agns' (int) is the number of agents in the environment.
@@ -127,7 +128,7 @@ args = {
 #       "seed": 2024
 #   }
 # }
-
+    
 
 # Initialize environment
 env = env_REGISTRY[args["env"]](**args["env_args"])
@@ -137,9 +138,16 @@ n_acts = env.get_total_actions()
 obs, state = env.reset()
 done = False
 # Run an episode
-while not done:
+i = 0
+rl_video_recorder = RLVideoRecorder(env)
+
+while not done and i < 100:
     # Render the environment (optional)
-    env.render()
+    #env.render()
+    
+    # Record the environment (optional)
+    #rl_video_recorder.record_video()
+    
     # Insert the policy's actions here
     actions = env.sample_actions()
 
@@ -148,13 +156,16 @@ while not done:
     obs = env.get_obs()
     state = env.get_state()
     info = env.get_info()
+    i += 1
     
-    print(actions)
-    print("Reward " + str(reward))
-# Terminate the environment
-env.close()
+    print("Obs 0")
+    print(obs[0].shape)
+    print(i)
 
-##########################################################################################################
+# Terminate the environment
+
+#rl_video_recorder.save_video()
+env.close()
 
 
 ####################################### API for NON-fully cooperative tasks, two cases: ##############################
@@ -218,7 +229,7 @@ while not done:
 # Terminate the environment
 env.close()
 """
-##########################################################################################################
+""
 
 
 ####################################### API for Classic environment ###################################
@@ -264,4 +275,4 @@ env.close()
 #     env.step(action)
 # env.close()
 
-##########################################################################################################
+""

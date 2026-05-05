@@ -1,0 +1,165 @@
+
+# --- pymarlzooplus options ---
+#--------------------------------------------
+#NOT USED IN DECENTRALIZED SETTINGS. MAY BE CHANGED IN FUTURE
+runner: "episode" # Runs 1 env for an episode
+mac: "basic_mac" # Basic controller
+buffer_cpu_only: True # If true, we won't keep all of the replay buffer in vram
+extra_in_buffer: []
+#---------------------------------------------
+
+#From default.yaml----------------------------
+env: "sc2" # Environment name
+env_args: {} # Arguments for the environment
+batch_size_run: 1 # Number of environments to run in parallel
+test_nepisode: 20 # Number of episodes to test for
+test_interval: 2000 # Test after {} timesteps have passed
+test_greedy: True # Use greedy evaluation (if False, will set epsilon floor to 0
+log_interval: 2000 # Log summary of stats after every {} timesteps
+runner_log_interval: 2000 # Log runner stats (not test stats) every {} timesteps
+learner_log_interval: 2000 # Log training stats every {} timesteps
+
+t_max: 10000 # Stop running after this many timesteps
+#### total_timesteps: int = 500000
+#### """total timesteps of the experiments"""
+
+use_cuda: False # Use gpu by default unless it isn't available
+use_cuda_cnn_modules: True # Use gpu. This is only for the CNN modules. If 'use_cuda' is True, 'use_cuda_cnn_modules' should also be True.
+
+
+
+#From cleanrl ppo.py---------------------------
+#-----------------------
+seed: 1 # Seed of the experiment.  WORDT  MISSCHIEN AL GEBRUIKT DOOR ENV_ARGS{}
+#----------------------
+torch_deterministic: True # if toggled, `torch.backends.cudnn.deterministic=False
+cuda: True #if toggled, cuda will be enabled. SEE ALSO CUDA FROM PYMARLZOOPLUS
+capture_video: False # whether to capture videos of the agent performances (check out `videos` folder)
+
+
+
+
+
+
+
+# --- Logging options --- NOT USED YET
+use_tensorboard: False # Log results to tensorboard
+save_model: False # Save the models to disk
+save_model_interval: 50000 # Save models after this many timesteps
+checkpoint_path: "" # Load a checkpoint from this path
+evaluate: False # Evaluate model for test_nepisode episodes and quit (no training)
+render: False # Render the environment when evaluating (only when evaluate == True)
+load_step: 0 # Load model trained on this many timesteps (0 if choose max possible)
+save_replay: False # Saving the replay of the model loaded from checkpoint_path
+local_results_path: "results" # Path for local results
+
+
+# --- RL hyperparameters ---
+gamma: 0.99
+#-------------------------------
+#LOOK AT PPO NUM_ENVS AND NUM_STEPS: THERE IT IS BATCH_SIZE: NUM_ENVS * NUM_STEPS
+batch_size: 32 # Number of episodes to train on
+buffer_size: 32 # Size of the replay buffer
+#---------------------------
+optim_alpha: 0.99 # RMSProp alpha
+optim_eps: 0.00001 # RMSProp epsilon
+grad_norm_clip: 10 # Reduce magnitude of gradients above this L2 norm
+add_value_last_step: True
+num_circle: 1 # Number of training iterations after each episode
+prioritized_buffer: False # NOT PPO BASED
+
+#lr: 0.0005 # Learning rate for agents. IS 0.00025 IN CLEANRL, 0.0003 IN IPPO_NS.
+
+
+# --- Agent parameters ---
+agent: "rnn" # Default rnn agent
+hidden_dim: 64 # Size of hidden state for default rnn agent
+
+# I CHANGED THIS TO TRUE. CORRESPONDS probablly TO NORM_ADV IN CLEANRL
+standardise_returns: True  #"""Toggles advantages normalization"""
+standardise_rewards: False
+
+cnn_features_dim: 128 # Size of the dense layer after flattening CNN features. Only applicable with image observations and trainable CNN.
+obs_agent_id: True # Include the agent's one_hot id in the observation
+obs_last_action: True # Include the agent's last action (one_hot) in the observation
+has_explorer: False
+explorer: null
+action_selector_strategy: "basic_selector_strategy"
+
+# --- Experiment running params ---
+repeat_id: 1
+label: "default_label"
+hypergroup: null
+
+
+
+
+
+#--------------paramters From cleanrl ppo.py---------------------
+# lr: 0.0003           THIS IS ALMOST SAME AS PYMARLZOOPLUS
+lr: 0.00025            #"""the learning rate of the optimizer"""
+
+# q_nstep: 5           # 1 corresponds to normal r + gammaV SIMILAR TO GAE_LAMBDA
+gae_lambda: 0.95       #"""the lambda for the general advantage estimation"""
+anneal_lr: True        #"""Toggle learning rate annealing for policy and value networks"""
+
+# See batch_size in pymarlzooplus
+num_envs: 4            #"""the number of parallel game environments"""
+num_steps: 128         #"""the number of steps to run in each environmet per policy rollout"""
+
+# MINIBATCHES ARE NOT USED IN PYMARLZOOPLUS????
+num_minibatches: 4     #"""the number of mini-batches"""
+
+#epochs: 4             THIS IS PROBABLY SAME AS PYMARLZOOPLUS
+update_epochs: 4       #"""the K epochs to update the policy"""
+
+#norm_adv: bool = True # SEE STANDARDISE_RETURNS.
+
+
+## eps_clip: 0.2       THIS IS SAME AS PYMARLZOOPLUS
+clip_coef: 0.2         #"""the surrogate (EPSILON) clipping coefficient"""
+clip_vloss: True       #"""Toggles whether or not to use a clipped loss for the value function, as per the paper."""
+
+#entropy_coef: 0.01    THIS IS SAME AS PYMARLZOOPLUS
+ent_coef: 0.01         #"""coefficient of the entropy"""
+vf_coef: 0.5           #"""coefficient of the value function"""
+
+#grad_norm_clip: 10 # Reduce magnitude of gradients above this L2 norm. Changed it from 0.5 to 5 becuase of MARL settings
+max_grad_norm: 5       #"""the maximum norm for the gradient clipping""" ORIGINALLY 0.5
+target_kl: null        #float = None """the target KL divergence threshold"""
+
+# to be filled in runtime
+batch_size: 0          #"""the batch size (computed in runtime)"""
+minibatch_size: 0      #"""the mini-batch size (computed in runtime)"""
+num_iterations: 0      #"""the number of iterations (computed in runtime)"""
+#------------------------------------------------------
+
+
+
+# FROM IPPO_NS. SPECIALIZED SETTINGS.
+# buffer_size: 10
+# batch_size_run: 10
+# batch_size: 10
+
+# # update the target network every {} training steps
+# target_update_interval_or_tau: 200
+
+# lr: 0.0003
+
+# obs_agent_id: False
+# obs_last_action: False
+# obs_individual_obs: False
+
+# mac: "non_shared_mac"
+# agent: "rnn_ns"
+# agent_output_type: "pi_logits"
+# learner: "ppo_learner"
+# entropy_coef: 0.01
+# standardise_returns: False
+# standardise_rewards: True
+# use_rnn: False
+# epochs: 4
+# eps_clip: 0.2
+# q_nstep: 5 # 1 corresponds to normal r + gammaV
+# critic_type: "ac_critic_ns"
+# name: "ippo_ns"

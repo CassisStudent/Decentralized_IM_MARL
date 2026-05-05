@@ -1,0 +1,45 @@
+env: "pettingzoo"
+env_args: {
+    key: "pistonball_v6",
+    time_limit: 900,  # Episode horizon.
+    render_mode: "rgb_array",  # Options: "human", "rgb_array
+    image_encoder: "ResNet18",  # Options: "ResNet18", "SlimSAM", "CLIP"
+    image_encoder_use_cuda: False,  # Whether to load image-encoder in GPU or not.
+    image_encoder_batch_size: 10,  # How many images to encode in a single pass.
+    partial_observation: False,  # Only for "Emtombed: Cooperative" and "Space Invaders"
+    trainable_cnn: False,  # Specifies whether to return image-observation or the encoded vector-observation
+    kwargs: "",
+    seed: 2024
+}
+num_episodes: 1
+agent: "rnn"
+hidden_dim: 64         # Size of hidden state for default rnn agent
+learner_log_interval: 2000 # Log training stats every {} timesteps
+
+
+use_cuda: False # Use gpu by default unless it isn't available
+use_cuda_cnn_modules: True # Use gpu. This is only for the CNN modules. If 'use_cuda' is True, 'use_cuda_cnn_modules' should also be True.
+
+
+
+
+# specific for algorithm
+lr: 0.00025            #"""the learning rate of the optimizer"""
+critic_type: "decentralized_critic"
+
+obs_agent_id: False
+obs_last_action: False
+obs_individual_obs: False
+
+# I CHANGED THIS TO TRUE. CORRESPONDS probablly TO NORM_ADV IN CLEANRL
+standardise_returns: True  #"""Toggles advantages normalization"""
+standardise_rewards: False
+
+
+
+
+
+
+name: "ippo_ns"
+use_rnn: False
+n_agents: -1 #Dit boeit volgens mij echt geen reet, maar moet RNNagent hebben blijkbaar.
