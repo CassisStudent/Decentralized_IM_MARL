@@ -43,10 +43,8 @@ class IndependentPPOLearner:
 
             
     def select_action(self, obs, action=None, available_actions=None):
-        #Not sure if this reshaping of the observation is necessary but let's see what happens
-        obsReshaped = th.tensor(obs)
-        
-        logits, self.hidden_state = self.actor(obsReshaped, self.hidden_state)
+        #Not sure if this reshaping of the observation is necessary but let's see what happens        
+        logits, self.hidden_state = self.actor(obs, self.hidden_state)
 
         if available_actions is not None:
             logits[available_actions == 0] = -1e10  # mask invalid actions
@@ -57,12 +55,12 @@ class IndependentPPOLearner:
     
         log_prob = probs.log_prob(action)
         
-        value = self.critic(obsReshaped)
+        value = self.critic(obs)
         
         # misschien #action.item()?
         return action, log_prob, probs.entropy(), value
     
-    def get_probs(self, obs, action, available_actions=None):
+    def get_logprobs(self, obs, action, available_actions=None):
         logits, self.hidden_state = self.actor(obs, self.hidden_state)
         if available_actions is not None:
             logits[available_actions == 0] = -1e10  # mask invalid actions
@@ -73,6 +71,212 @@ class IndependentPPOLearner:
 
     def init_hidden(self):
         self.hidden_state = self.actor.init_hidden()
+    
+    def init_hidden_buffer(self, buffer_size):
+        self.hidden_state = self.actor.init_hidden().expand(buffer_size, -1).contiguous()
+    
+    def update3(self, obs, actions, old_logprobs, old_values, rewards, dones):
+        device = next(self.actor.parameters()).device
+        
+        print("updating");
+        buffer_size, max_seq_length = rewards.shape
+        
+        # ----------------------------
+        # MASK
+        # ----------------------------
+        mask = th.ones_like(dones)
+        mask[:, 1:] = (1 - dones[:, :-1]).cumprod(dim=1)
+
+        if self.args.standardise_rewards:
+            self.rew_ms.update(rewards)
+            rewards = (rewards - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
+
+        # ----------------------------
+        # RETURNS (per episode)
+        # ----------------------------
+        target_returns = th.zeros_like(rewards)
+        
+        for b_index in range(buffer_size):
+            target_returns[b_index] = self.compute_nstep_returns(
+                rewards[b_index],
+                old_values[b_index],
+                mask[b_index],
+                self.args.q_nstep
+            )
+            
+        advantages = (target_returns - old_values).detach()
+        advantages = advantages * mask
+
+        if self.args.standardise_advantages:
+            valid = advantages[mask > 0]
+            advantages = (advantages - valid.mean()) / (valid.std() + 1e-8)
+            advantages = advantages * mask
+
+        print(advantages.mean().item(), advantages.std().item())
+        
+        for k in range(self.args.epochs):            
+            new_logprobs = th.zeros_like(old_logprobs, device=device)
+            entropies = th.zeros_like(old_logprobs, device=device)
+            new_values = th.zeros_like(old_values, device=device)
+
+            #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
+            self.init_hidden_buffer(buffer_size)
+
+            for step in range(max_seq_length):
+                obs_t = obs[:, step]
+                actions_t = actions[:, step]
+                
+                new_logprob, entropy= self.get_logprobs(obs_t, actions_t)
+                #v = self.critic(obs_t).squeeze(-1)
+
+                new_logprobs[:, step] = new_logprob
+                entropies[:, step] = entropy
+                #new_values[:, step] = v
+            
+            v = self.critic(obs).squeeze(-1)
+            new_values = v
+            
+            if new_values.shape == target_returns.shape:
+                print("jjipppieee het klopt")
+                print(new_values)
+                print(target_returns)
+            else:
+                print("help nee het werkt niet")
+                print(new_values.shape)
+                print(target_returns.shape)
+            
+            print("rewards")
+            print(rewards)
+            #actor loss
+            ratio = th.exp(new_logprobs - old_logprobs)
+            surr1 = ratio * advantages
+            surr2 = th.clamp(ratio, 1 - self.args.eps_clip, 1 + self.args.eps_clip) * advantages
+            
+            pg_loss = -th.min(surr1, surr2)
+            pg_loss = (pg_loss * mask).sum() / mask.sum()
+            
+            entropy_loss = -(entropies * mask).sum() / mask.sum()
+            actor_loss = pg_loss - self.args.entropy_coef * entropy_loss
+            
+            #critic loss
+            td_error = (target_returns.detach() - new_values)
+            masked_td_error = td_error * mask
+            critic_loss = (masked_td_error ** 2).sum() / mask.sum()
+
+            #pg_loss = -((th.min(surr1, surr2) + self.args.entropy_coef * entropy) * mask).sum() / mask.sum()
+
+            # Optimise agents
+            self.actor_optimiser.zero_grad()
+            actor_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
+            self.actor_optimiser.step()
+            
+            #optimise critic
+            self.critic_optimiser.zero_grad()
+            critic_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
+            self.critic_optimiser.step()
+            
+            print("reward:", rewards.mean().item())
+            print("actor loss:", actor_loss.item())
+            print("critic loss:", critic_loss.item())
+            print("entropy:", entropy_loss.item())
+            print(self.hidden_state.abs().mean().item())
+            print(ratio.mean().item())
+        
+    def update2(self, obs, actions, old_logprobs, old_values, rewards, dones):
+        device = next(self.actor.parameters()).device
+        
+        #obs = th.tensor(obs, dtype=th.float32, device=device)
+        #actions = th.tensor(actions, dtype=th.long, device=device)
+        #old_logprobs = th.tensor(old_logprobs, dtype=th.float32, device=device)
+        #old_values = th.tensor(old_values, dtype=th.float32, device=device)
+        #rewards = th.tensor(rewards, dtype=th.float32, device=device)
+        #dones = th.tensor(dones, dtype=th.float32, device=device)
+        
+        buffer_size, max_seq_length = rewards.shape
+        
+        # ----------------------------
+        # MASK
+        # ----------------------------
+        mask = th.ones_like(dones)
+        mask = (1 - dones).cumprod(dim=1)
+        #for b_index in range(buffer_size):
+            #for t in range(1, max_seq_length):
+            #    mask[b_index, t] = mask[b_index, t-1] * (1 - dones[b_index, t-1])
+
+        if self.args.standardise_rewards:
+            self.rew_ms.update(rewards)
+            rewards = (rewards - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
+
+        # ----------------------------
+        # RETURNS (per episode)
+        # ----------------------------
+        target_returns = th.zeros_like(rewards)
+        
+        for b_index in range(buffer_size):
+            target_returns[b_index] = self.compute_nstep_returns(
+                rewards[b_index],
+                old_values[b_index],
+                mask[b_index],
+                self.args.q_nstep
+            )
+            
+        advantages = (target_returns - old_values).detach()
+
+        for k in range(self.args.epochs):            
+            new_logprobs = th.zeros_like(old_logprobs, device=device)
+            entropies = th.zeros_like(old_logprobs, device=device)
+            new_values = th.zeros_like(old_values, device=device)
+
+            #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
+            for b_index in range(buffer_size):
+                self.init_hidden()
+                
+                ep_length = int(mask[b_index].sum().item())
+                
+                for step in range(ep_length):
+                    new_logprob, entropy= self.get_logprobs(obs[b_index, step], actions[b_index, step])
+                    v = self.critic(obs[b_index, step])
+
+                    new_logprobs[b_index, step] = new_logprob
+                    entropies[b_index, step] = entropy
+                    new_values[b_index, step] = v
+
+            
+            #actor loss
+            ratio = th.exp(new_logprobs - old_logprobs)
+            surr1 = ratio * advantages
+            surr2 = th.clamp(ratio, 1 - self.args.eps_clip, 1 + self.args.eps_clip) * advantages
+            
+            pg_loss = -th.min(surr1, surr2)
+            pg_loss = (pg_loss * mask).sum() / mask.sum()
+            
+            entropy_loss = -(entropies * mask).sum() / mask.sum()
+            actor_loss = pg_loss - self.args.entropy_coef * entropy_loss
+            
+            #critic loss
+            td_error = (target_returns.detach() - new_values)
+            masked_td_error = td_error * mask
+            critic_loss = (masked_td_error ** 2).sum() / mask.sum()
+
+            #pg_loss = -((th.min(surr1, surr2) + self.args.entropy_coef * entropy) * mask).sum() / mask.sum()
+
+            # Optimise agents
+            self.actor_optimiser.zero_grad()
+            actor_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
+            self.actor_optimiser.step()
+            
+            #optimise critic
+            self.critic_optimiser.zero_grad()
+            critic_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
+            self.critic_optimiser.step()
     
     def update(self, obs, actions, old_logprobs, old_values, rewards, dones):
         
@@ -85,21 +289,24 @@ class IndependentPPOLearner:
         rewards = th.tensor(rewards, dtype=th.float32, device=device)
         dones = th.tensor(dones, dtype=th.float32, device=device)
         
-        mask = (1 - dones)
+        # Build proper mask
+        mask = th.ones_like(dones)
+        for t in range(1, len(dones)):
+            mask[t] = mask[t-1] * (1 - dones[t-1])
         
         if self.args.standardise_rewards:
             self.rew_ms.update(rewards)
             rewards = (rewards - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
 
-        
         target_returns = self.compute_nstep_returns(rewards, old_values, mask, self.args.q_nstep)
-        
+        advantages = (target_returns - old_values).detach()
+
         for k in range(self.args.epochs):
             self.init_hidden()
             
-            new_logprobs = torch.zeros(len(obs), device=device)
-            entropies = torch.zeros(len(obs), device=device)
-            new_values = torch.zeros(len(obs), device=device)
+            new_logprobs = th.zeros(len(obs), device=device)
+            entropies = th.zeros(len(obs), device=device)
+            new_values = th.zeros(len(obs), device=device)
 
             #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
             for step in range(len(obs)):
@@ -110,7 +317,6 @@ class IndependentPPOLearner:
                 entropies[step] = entropy
                 new_values[step] = v
 
-            advantages = (target_returns - old_values).detach()
             
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
@@ -144,12 +350,12 @@ class IndependentPPOLearner:
             th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
             self.critic_optimiser.step()
             
-    def compute_nstep_returns(rewards, values, mask, n_steps):
+    def compute_nstep_returns(self, rewards, values, mask, n_steps):
         """
         Gt(n)=∑k=0n−1γkRt+k+γnV(st+n)
         """
         T = rewards.shape[0]
-        returns = torch.zeros_like(rewards)
+        returns = th.zeros_like(rewards)
         
         for t in range(T):
             return_t = 0.0
@@ -333,6 +539,11 @@ class IndependentPPOLearner:
     def cuda(self):
         self.old_mac.cuda()
         self.mac.cuda()
+        self.critic.cuda()
+        self.target_critic.cuda()
+    
+    def cuda_new(self):
+        self.actor.cuda()
         self.critic.cuda()
         self.target_critic.cuda()
 

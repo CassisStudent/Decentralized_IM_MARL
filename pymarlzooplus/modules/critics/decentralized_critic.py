@@ -74,6 +74,11 @@ class DecentralizedCritic(nn.Module):
         for i, a in enumerate(self.critics):
             a.load_state_dict(state_dict[i])
 
+    """
     def cuda(self):
         for c in self.critics:
             c.cuda()
+    """
+    
+    def cuda(self):
+        self.network.cuda()

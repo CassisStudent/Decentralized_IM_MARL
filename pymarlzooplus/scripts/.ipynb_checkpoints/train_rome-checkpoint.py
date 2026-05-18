@@ -3,12 +3,15 @@ import yaml
 import os
 import sys
 import torch
+import time
 from types import SimpleNamespace as SN
+import numpy as np
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
 from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
 from pymarlzooplus.utils.logging_setup import Logger
+
 
 
 
@@ -67,12 +70,12 @@ def read_config():
 def args_sanity_check(config):  #,  _log):
 
     # Set CUDA flags
-    if config["use_cuda"] and not th.cuda.is_available():
+    if config["use_cuda"] and not torch.cuda.is_available():
         config["use_cuda"] = False
         print(
             "CUDA flag use_cuda was switched OFF automatically because no CUDA devices are available!"
         )
-    if config["use_cuda_cnn_modules"] and not th.cuda.is_available():
+    if config["use_cuda_cnn_modules"] and not torch.cuda.is_available():
         config["use_cuda_cnn_modules"] = False
         print(
             "CUDA flag use_cuda_cnn_modules was switched OFF automatically because no CUDA devices are available!"
@@ -90,14 +93,14 @@ def args_sanity_check(config):  #,  _log):
             print(
                 "'centralized_image_encoding' was turned to False since only 1 env process is running!"
             )
-
+    """
     if config["test_nepisode"] < config["batch_size_run"]:
         config["test_nepisode"] = config["batch_size_run"]
     else:
         config["test_nepisode"] = (
             config["test_nepisode"] // config["batch_size_run"]
         ) * config["batch_size_run"]
-
+    """
     return config
 
 def train_ippo():
@@ -105,13 +108,20 @@ def train_ippo():
     _config = read_config()
     
     # check args sanity 
-    #_config = args_sanity_check(_config) #, _log)
+    _config = args_sanity_check(_config) #, _log)
     
     
     args = SN(**_config)
     
+    args.device = "cuda" if args.use_cuda else "cpu"
+    args.device_cnn_modules = "cuda" if args.use_cuda_cnn_modules else "cpu"
+    torch.backends.cudnn.benchmark = True
+    
     # 1b. Create environment
     env = env_REGISTRY[_config["env"]](**_config["env_args"])
+    env_info = env.get_env_info()
+    
+    max_episode_length = env_info["episode_limit"] + 1
     #env = env_REGISTRY[args["env"]](**args["env_args"])
 
     n_agents = env.get_n_agents()
@@ -121,30 +131,13 @@ def train_ippo():
     args.n_agents = n_agents
     args.n_actions = n_actions
     
-    
-    print(n_actions)
-    print(args)
-    
+    args.num_iterations = args.t_max // args.buffer_size
     
     # 1c. Create videorecorder.
     rl_video_recorder = RLVideoRecorder(env)
 
     # 2. Create per-agent PPO learners
     agents = []
-    #buffers = []
-    
-    # 2a. Create Buffers
-    
-    #Assums no partial observation and rewards are shared among agents
-    obs_buffer = torch.zeros(args.buffer_size, observation_dimension)
-    rewards_buffer = torch.zeros(args.buffer_size)
-    dones_buffer = torch.zeros(args.buffer_size)
-    actions_buffer = torch.zeros(args.buffer_size, n_agents)
-    logprobs_buffer = torch.zeros(args.buffer_size, n_agents)
-    values_buffer = torch.zeros(args.buffer_size, n_agents)
-    
-    print("obs_buffer.shape: " + str(obs_buffer.shape))
-
     for i in range(n_agents):
         learner = IndependentPPOLearner(
             obs_dimension=observation_dimension,
@@ -152,25 +145,121 @@ def train_ippo():
             args=args
         )
         agents.append(learner)
+        
+        if args.use_cuda:
+            learner.cuda_new()
         #buffers.append(AgentBuffer(max_steps=args["episode_limit"]))
+
     
-    # 3. Training loop
-    for episode in range(args.num_episodes):
+    # 2a. Create Buffers
+    device = next(agents[0].actor.parameters()).device
     
-        # Reset the environment
+    print(device)
+    
+    obs_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, observation_dimension, device=device)
+    rewards_buffer = torch.zeros(args.buffer_size, max_episode_length, device=device)
+    dones_buffer = torch.zeros(args.buffer_size, max_episode_length, device=device)
+    actions_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, dtype=torch.long, device=device)
+    logprobs_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, device=device)
+    values_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, device=device)
+    
+    print("obs_buffer.shape: " + str(obs_buffer.shape))
+    
+    t = 0
+    episode_index = 0
+    
+    while t < args.t_max:
         obs, state = env.reset()
         done = False
+        
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
         
         # Init hidden state agent: (memory of of this episode)
         for agent in agents:
             agent.init_hidden()
         
-        print(len(obs))
+        for step in range(0, max_episode_length):
+            #rl_video_recorder.record_video()
+
+            # 3a. Select actions per agent
+            actions = np.empty(n_agents, dtype=np.int64)
+            log_probs = []
+        
+            with torch.inference_mode():
+                for i in range(n_agents):
+                    action, logp, _, value = agents[i].select_action(obs[i])
+                    actions[i] = action.item()
+                    log_probs.append(logp)
+                                        
+                    actions_buffer[episode_index, i, step] = action.detach()
+                    logprobs_buffer[episode_index, i, step] = logp.detach()
+                    values_buffer[episode_index, i, step] =  value.detach()
+                    obs_buffer[episode_index, i, step] = obs[i]
+    
+            # 3b. Step environment
+            reward, done, extra_info = env.step(actions)
+            obs = env.get_obs()
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+            
+            rewards_buffer[episode_index, step] = reward
+            dones_buffer[episode_index, step] = done
+            
+            if step % 250 == 0:
+                print(step)
+            t += 1
+
+            if (done == True):
+                break
+        
+        episode_index += 1
+
+        # 4. PPO update per agent (OUTSIDE OF EPISODE LOOP)
+        if episode_index == args.buffer_size:
+            for i in range(n_agents):
+                agents[i].update3(
+                    obs_buffer[:, i], 
+                    actions_buffer[:, i],
+                    logprobs_buffer[:, i],
+                    values_buffer[:, i],
+                    rewards_buffer,
+                    dones_buffer
+                )
+            episode_index = 0
+            
+            obs_buffer.zero_()
+            actions_buffer.zero_()
+            logprobs_buffer.zero_()
+            values_buffer.zero_()
+            rewards_buffer.zero_()
+            dones_buffer.zero_()
+            #No reset needed of the buffer because we overwrite them???
+        
+    env.close()
+
+    
+    
+    
+    """
+    # 3. Training loop
+    for iteration in range(args.num_iterations):
+    
+        # Reset the environment
+        obs, state = env.reset()
+        done = False
+        
+        obs = torch.tensor(obs, dtype=torch.float32, device=device)
+        
+        # Init hidden state agent: (memory of of this episode)
+        for agent in agents:
+            agent.init_hidden()
+        
+        temp_obs = torch.tensor(obs)
+        print("len obs: " + str(len(obs)))
+        print(temp_obs.shape)
         print("number of agents " + str(n_agents)) 
 
-        obs_buffer[t] = torch.tensor(obs)
+        #obs_buffer[t] = torch.tensor(obs)
 
-        
         # Run an episode
         for step in range(0, args.buffer_size):
             # Render the environment (optional)
@@ -180,22 +269,28 @@ def train_ippo():
             actions = []
             log_probs = []
             
-            obs_buffer[step] = obs
+            #obs_buffer[step] = obs
             dones_buffer[step] = done
-            
+                        
             with torch.no_grad():
                 for i in range(n_agents):
-                    action, logp, value = agents[i].select_action(obs[i])
+                    action, logp, _, value = agents[i].select_action(obs[i])
                     actions.append(action)
                     log_probs.append(logp)
-
-                    actions_buffer[step, i] = action
-                    logprobs_buffer[step, i] = logp
-                    values_buffer[step, i] = value
+                                        
+                    actions_buffer[i, step] = action.detach()
+                    logprobs_buffer[i, step] = logp.detach()
+                    values_buffer[i, step] =  value.detach()
+                    obs_buffer[i, step] = obs[i]
+                    
+                    #actions_buffer[step, i] = action.detach()
+                    #logprobs_buffer[step, i] = logp.detach()
+                    #values_buffer[step, i] =  value.detach()
     
             # 3b. Step environment
             reward, done, extra_info = env.step(actions)
             obs = env.get_obs()
+            obs = torch.tensor(obs, dtype=torch.float32, device=device)
             
             rewards_buffer[step] = reward
             
@@ -205,20 +300,25 @@ def train_ippo():
             
             # optional: Additional Info about the environment we might need
             #info = env.get_info()
-            if done is True or step > 100:
-                break
-        """
+
         # 4. PPO update per agent (OUTSIDE OF EPISODE LOOP)
         for i in range(n_agents):
-            batch = buffers[i].to_batch()
-            agents[i].update(batch)
-            buffers[i].reset()
-        """
+            agents[i].update(
+                obs_buffer[i], 
+                actions_buffer[i],
+                logprobs_buffer[i],
+                values_buffer[i],
+                rewards_buffer,
+                dones_buffer
+            )
+            #batch = buffers[i].to_batch()
+            #agents[i].update(batch)
+            #buffers[i].reset()
         # Save evaluation video
         #rl_video_recorder.save_video()
-        
     # Terminate the environment
     env.close()
+    """
 
     
 if __name__ == '__main__':
