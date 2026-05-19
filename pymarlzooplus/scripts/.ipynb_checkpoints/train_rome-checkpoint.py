@@ -201,6 +201,9 @@ def train_ippo():
             obs = env.get_obs()
             obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
             
+            print("obs.shape")
+            print(obs.shape)
+            
             rewards_buffer[episode_index, step] = reward
             dones_buffer[episode_index, step] = done
             
