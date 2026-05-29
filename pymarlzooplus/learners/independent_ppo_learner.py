@@ -54,11 +54,26 @@ class IndependentPPOLearner:
             action = probs.sample()
     
         log_prob = probs.log_prob(action)
-        
         value = self.critic(obs)
         
         # misschien #action.item()?
         return action, log_prob, probs.entropy(), value
+    
+    def select_action(self, obs, hidden_state, action=None, available_actions=None):
+        logits, next_hidden_state = self.actor(obs, hidden_state)
+        
+        if available_actions is not None:
+            logits[available_actions == 0] = -1e10  # mask invalid actions
+        
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+    
+        log_prob = probs.log_prob(action)
+        value = self.critic(obs)
+        
+        # misschien #action.item()?
+        return action, log_prob, probs.entropy(), value, next_hidden_state
     
     def get_logprobs(self, obs, action, available_actions=None):
         logits, self.hidden_state = self.actor(obs, self.hidden_state)
@@ -74,6 +89,122 @@ class IndependentPPOLearner:
     
     def init_hidden_buffer(self, buffer_size):
         self.hidden_state = self.actor.init_hidden().expand(buffer_size, -1).contiguous()
+    
+    def update4(self, obs, actions, old_logprobs, old_values, rewards, dones):
+        device = next(self.actor.parameters()).device
+        
+        print("updating");
+        buffer_size, max_seq_length = rewards.shape
+        
+        # ----------------------------
+        # MASK
+        # ----------------------------
+        mask = th.ones_like(dones, device=device)
+        mask[:, 1:] = (1 - dones[:, :-1]).cumprod(dim=1)
+
+        print("mask")
+        if self.args.standardise_rewards:
+            self.rew_ms.update(rewards)
+            rewards = (rewards - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
+
+        print("standardise rewards")
+
+        # ----------------------------
+        # RETURNS (per episode)
+        # ----------------------------
+        target_returns = th.zeros_like(rewards, device=device)
+        
+        for b_index in range(buffer_size):
+            target_returns[b_index] = self.compute_nstep_returns(
+                rewards[b_index],
+                old_values[b_index],
+                mask[b_index],
+                self.args.q_nstep
+            )
+       
+        print("target returns")
+
+        advantages = (target_returns - old_values).detach()
+        advantages = advantages * mask
+
+        print("advantage")
+
+        if self.args.standardise_advantages:
+            valid = advantages[mask > 0]
+            advantages = (advantages - valid.mean()) / (valid.std() + 1e-8)
+            advantages = advantages * mask
+
+        print(advantages.mean().item(), advantages.std().item())
+        
+        for k in range(self.args.epochs):            
+            new_logprobs = th.zeros_like(old_logprobs, device=device)
+            entropies = th.zeros_like(old_logprobs, device=device)
+            new_values = th.zeros_like(old_values, device=device)
+
+            #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
+            #self.init_hidden_buffer(buffer_size)
+            
+            local_hidden = self.actor.init_hidden().expand(1, buffer_size, -1).contiguous().to(device)
+            
+            logits, _ = self.actor(obs, local_hidden)
+            probs = Categorical(logits=logits)
+            new_logprobs = probs.log_prob(actions.squeeze(-1))
+            entropies = probs.entropy()
+            
+            v = self.critic(obs).squeeze(-1)
+            new_values = v
+            """
+            if new_values.shape == target_returns.shape:
+                print("jjipppieee het klopt")
+                print(new_values)
+                print(target_returns)
+            else:
+                print("help nee het werkt niet")
+                print(new_values.shape)
+                print(target_returns.shape)
+            
+            print("rewards")
+            print(rewards)
+            """
+            #actor loss
+            ratio = th.exp(new_logprobs - old_logprobs)
+            surr1 = ratio * advantages
+            surr2 = th.clamp(ratio, 1 - self.args.eps_clip, 1 + self.args.eps_clip) * advantages
+            
+            pg_loss = -th.min(surr1, surr2)
+            pg_loss = (pg_loss * mask).sum() / mask.sum()
+            
+            entropy_loss = -(entropies * mask).sum() / mask.sum()
+            actor_loss = pg_loss - self.args.entropy_coef * entropy_loss
+            
+            #critic loss
+            td_error = (target_returns.detach() - new_values)
+            masked_td_error = td_error * mask
+            critic_loss = (masked_td_error ** 2).sum() / mask.sum()
+
+            #pg_loss = -((th.min(surr1, surr2) + self.args.entropy_coef * entropy) * mask).sum() / mask.sum()
+
+            # Optimise agents
+            self.actor_optimiser.zero_grad()
+            actor_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
+            self.actor_optimiser.step()
+            
+            #optimise critic
+            self.critic_optimiser.zero_grad()
+            critic_loss.backward()
+            
+            th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
+            self.critic_optimiser.step()
+            """
+            print("reward:", rewards.mean().item())
+            print("actor loss:", actor_loss.item())
+            print("critic loss:", critic_loss.item())
+            print("entropy:", entropy_loss.item())
+            print(self.hidden_state.abs().mean().item())
+            print(ratio.mean().item())
+            """
     
     def update3(self, obs, actions, old_logprobs, old_values, rewards, dones):
         device = next(self.actor.parameters()).device
@@ -135,7 +266,7 @@ class IndependentPPOLearner:
             
             v = self.critic(obs).squeeze(-1)
             new_values = v
-            
+            """
             if new_values.shape == target_returns.shape:
                 print("jjipppieee het klopt")
                 print(new_values)
@@ -147,6 +278,7 @@ class IndependentPPOLearner:
             
             print("rewards")
             print(rewards)
+            """
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
             surr1 = ratio * advantages
@@ -178,13 +310,14 @@ class IndependentPPOLearner:
             
             th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
             self.critic_optimiser.step()
-            
+            """
             print("reward:", rewards.mean().item())
             print("actor loss:", actor_loss.item())
             print("critic loss:", critic_loss.item())
             print("entropy:", entropy_loss.item())
             print(self.hidden_state.abs().mean().item())
             print(ratio.mean().item())
+            """
         
     def update2(self, obs, actions, old_logprobs, old_values, rewards, dones):
         device = next(self.actor.parameters()).device

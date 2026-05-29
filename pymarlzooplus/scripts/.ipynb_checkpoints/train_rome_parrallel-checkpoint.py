@@ -6,6 +6,7 @@ import torch
 import time
 from types import SimpleNamespace as SN
 import numpy as np
+import asyncio
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
@@ -102,6 +103,19 @@ def args_sanity_check(config):  #,  _log):
         ) * config["batch_size_run"]
     """
     return config
+
+
+
+# Define async helpers to wrap the blocking IPC methods
+async def async_send(conn, message):
+    # Sends are usually fast, but we wrap it to keep the loop fluid
+    return await asyncio.to_thread(conn.send, message)
+
+async def async_recv(conn):
+    # Offloads the blocking recv() to a background thread
+    return await asyncio.to_thread(conn.recv)
+
+
 
 def train_ippo():
     # 1a. Get config (TODO LETS CHECK ON SEED)
@@ -211,23 +225,28 @@ def train_ippo():
         envs_not_terminated = [b_idx for b_idx, termed in enumerate(terminated) if not termed]
         
         # Reset the envs
-        for parent_conn in parent_conns:
-            parent_conn.send(("reset", None))
-        
+        #for parent_conn in parent_conns:
+        #    parent_conn.send(("reset", None))
         #obs, state = env.reset()
         #done = False
         
+        # 1. Reset all envs concurrently
+        await asyncio.gather(*[async_send(p_conn, ("reset", None)) for p_conn in parent_conns])
+        
         #obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
+        
         # Init hidden state agent: (memory of of this episode)
         for agent in agents:
             agent.init_hidden_buffer(buffer_size)
         
-        for b_index, parent_conn in enumerate(parent_conns):
-            data = parent_conn.recv()
-            obs[b_index] = data["obs"]
+        #for b_index, parent_conn in enumerate(parent_conns):
+        #    data = parent_conn.recv()
+        #    obs[b_index] = torch.from_numpy(data["obs"]).to(device)
         
+        init_data_samples = await asyncio.gather(*[async_recv(p_conn) for p_conn in parent_conns])
+        for b_index, data in enumerate(init_data_samples):
+            obs[b_index] = obs = torch.as_tensor(data["obs"], dtype=torch.float32, device=device) #torch.from_numpy(data["obs"]).to(device)
 
-        
         for step in range(0, max_episode_length):
             actions_all = []
             logp_all = []
@@ -236,13 +255,13 @@ def train_ippo():
             with torch.inference_mode():
                 for i in range(n_agents):
                     action, logp, _, value = agents[i].select_action(obs[:, i])
-                    actions_all.append(a)
+                    actions_all.append(action)
                     logp_all.append(logp)
                     value_all.append(value)
                     #actions[:, i] = action.cpu().numpy()
                     #log_probs.append(logp)
                     #log_probs = logp.cpu().numpy()
-                actions = torch.stack(actions_all, dim=1)   # (B, n_agents)
+                actions = torch.stack(actions_all, dim=1).cpu().numpy()   # (B, n_agents)
                 logprobs = torch.stack(logp_all, dim=1)
                 values = torch.stack(value_all, dim=1)
 
@@ -257,30 +276,42 @@ def train_ippo():
                     #values_buffer[:, i, step] =  value.detach()
                     #obs_buffer[:, i, step] = obs[:, i]
     
-            # 3b. Step environment
+            # 3b. Send step actions concurrently
+            send_tasks = []
             for idx, parent_conn in enumerate(parent_conns):
                 if idx in envs_not_terminated:  # We produced actions for this env
                     if not terminated[idx]:
-                        parent_conn.send(("step", actions[idx]))
+                        #parent_conn.send(("step", actions[idx]))
+                        send_tasks.append(async_send(parent_conn, ("step", actions[idx])))
                     # Rendering
                     if idx == 0 and test_mode and args.render:
-                        parent_conn.send(("render", None))
+                        send_tasks.append(async_send(parent_conn, ("render", None)))
+
+            if send_tasks:
+                await asyncio.gather(*send_tasks)
             
             # Update envs_not_terminated
             envs_not_terminated = [b_idx for b_idx, termed in enumerate(terminated) if not termed]
-            all_terminated = all(terminated)
-            if all_terminated:
+            if all(terminated):
                 break
-            
-            for b_index, parent_conn in enumerate(parent_conns):
-                if not terminated[b_index]:
-                    data = parent_conn.recv()
-                    obs[b_index] = data["obs"]
-                    rewards_buffer[b_index, step] = data["reward"]
-                    dones_buffer[b_index, step] = data["terminated"]
-                    terminated[idx] = data["terminated"]
+                
+            #4. Receive environment step updates concurrently
+            # Create tasks only for active, non-terminated environments
+            recv_tasks = [async_recv(parent_conns[b_idx]) for b_idx in envs_not_terminated]
+        
+            if recv_tasks:
+                step_results = await asyncio.gather(*recv_tasks)
 
-                    env_steps_this_run += 1
+                # Process results sequentially once all concurrent recvs finish
+                for b_index, data in zip(envs_not_terminated, step_results): #parent_conn in enumerate(parent_conns):
+                    if not terminated[b_index]:
+                        #data = parent_conn.recv()
+                        obs[b_index] = torch.from_numpy(data["obs"]).to(device)
+                        rewards_buffer[b_index, step] = data["reward"]
+                        dones_buffer[b_index, step] = data["terminated"]
+                        terminated[b_index] = data["terminated"]
+
+                        env_steps_this_run += 1
 
 
             #reward, done, extra_info = env.step(actions)
@@ -334,7 +365,7 @@ def env_worker(remote, env_fn, image_encoder):
             #avail_actions = env.get_avail_actions()
             #state = env.get_state()
             obs = env.get_obs()
-            obs = torch.as_tensor(obs, dtype=torch.float32)
+            #obs = torch.as_tensor(obs, dtype=torch.float32)
 
             if image_encoder is not None:
                 # 'obs' is tuple with a single element - a dictionary of observations, so we keep only this

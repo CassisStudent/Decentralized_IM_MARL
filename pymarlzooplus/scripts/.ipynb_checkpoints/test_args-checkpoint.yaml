@@ -1,29 +1,29 @@
-env: "pettingzoo"
-env_args: {
-    key: "pistonball_v6",
-    time_limit: 300,  # Episode horizon. SHOULD BE 900
-    render_mode: "rgb_array",  # Options: "human", "rgb_array
-    image_encoder: "ResNet18",  # Options: "ResNet18", "SlimSAM", "CLIP"
-    image_encoder_use_cuda: True,  # Whether to load image-encoder in GPU or not.
-    image_encoder_batch_size: 10,  # How many images to encode in a single pass.
-    partial_observation: False,  # Only for "Emtombed: Cooperative" and "Space Invaders"
-    trainable_cnn: False,  # Specifies whether to return image-observation or the encoded vector-observation
-    kwargs: "",
-    seed: 2024
-}
-
-#env: "pressureplate"
+#env: "pettingzoo"
 #env_args: {
-#    key: "pressureplate-linear-4p-v0",
-#    time_limit: 500,
-#    render: False,
+#    key: "pistonball_v6",
+#    time_limit: 300,  # Episode horizon. SHOULD BE 900
+#    render_mode: "rgb_array",  # Options: "human", "rgb_array
+#    image_encoder: "ResNet18",  # Options: "ResNet18", "SlimSAM", "CLIP"
+#    image_encoder_use_cuda: True,  # Whether to load image-encoder in GPU or not.
+#    image_encoder_batch_size: 10,  # How many images to encode in a single pass.
+#    partial_observation: False,  # Only for "Emtombed: Cooperative" and "Space Invaders"
+#    trainable_cnn: False,  # Specifies whether to return image-observation or the encoded vector-observation
+#    kwargs: "",
 #    seed: 2024
 #}
+
+env: "pressureplate"
+env_args: {
+    key: "pressureplate-linear-4p-v0",
+    time_limit: 500,
+    render: False,
+    seed: 2024
+}
 
 
 
 t_max: 15000
-agent: "rnn"
+agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
 
@@ -45,7 +45,7 @@ obs_agent_id: False
 obs_last_action: False
 obs_individual_obs: False
 
-buffer_size: 2 #IN cleanrl 128 steps and minibatches van 32 steps groot. In PyMarlzooplus is 32 the hoeveelheid EPISODES ipv steps. Dit is ook hetzelfde als batch_size. #batch_size: 32 is DAAROM NIET GEBRUIKT
+buffer_size: 32 #IN cleanrl 128 steps and minibatches van 32 steps groot. In PyMarlzooplus is 32 the hoeveelheid EPISODES ipv steps. Dit is ook hetzelfde als batch_size. #batch_size: 32 is DAAROM NIET GEBRUIKT
 
 q_nstep: 5 # 1 corresponds to normal r + gammaV
 epochs: 4
