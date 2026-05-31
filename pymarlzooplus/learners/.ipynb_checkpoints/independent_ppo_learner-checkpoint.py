@@ -13,28 +13,30 @@ from pymarlzooplus.components.standarize_stream import RunningMeanStd
 
 
 class IndependentPPOLearner:
-    def __init__(self, obs_dimension, act_dimension, args):#, policy, critic, args):
-        self.args = args        
+    def __init__(self, obs_dimension, act_dimension, args, device="cuda:0"):#, policy, critic, args):
+        self.args = args
+        self.device = device if args.use_cuda else "cpu"
         
-        self.actor = actor_registry[self.args.agent](obs_dimension, self.args) ## args.agent should BE rnnAgent.
+        print(self.device + " Device. Klopt dit wel?")
+        self.actor = actor_registry[self.args.agent](obs_dimension, self.args).to(self.device) ## args.agent should BE rnnAgent.
         self.actor_params = list(self.actor.parameters())
         self.actor_optimiser = Adam(params=self.actor_params, lr=args.lr)
 
-        self.critic = critic_registry[args.critic_type](obs_dimension, self.args)
+        self.critic = critic_registry[args.critic_type](obs_dimension, self.args).to(self.device)
         self.critic_params = list(self.critic.parameters())
         self.critic_optimiser = Adam(params=self.critic_params, lr=args.lr)
         
-        self.target_critic = copy.deepcopy(self.critic)
+        self.target_critic = copy.deepcopy(self.critic).to(self.device)
 
         self.last_target_update_step = 0
         self.critic_training_steps = 0
         self.log_stats_t = -self.args.learner_log_interval - 1
 
-        device = "cuda" if args.use_cuda else "cpu"
+        #device = "cuda" if args.use_cuda else "cpu"
         if self.args.standardise_returns:
-            self.ret_ms = RunningMeanStd(shape=(1, ), device=device) # changed the shape from self.n_agents to 1. IMPORTANT TO KEEP IN MIND
+            self.ret_ms = RunningMeanStd(shape=(1, ), device=self.device) # changed the shape from self.n_agents to 1. IMPORTANT TO KEEP IN MIND
         if self.args.standardise_rewards:
-            self.rew_ms = RunningMeanStd(shape=(1,), device=device)
+            self.rew_ms = RunningMeanStd(shape=(1,), device=self.device)
         
         #We don't need it
         #self.action_selector = action_REGISTRY[args.action_selector](args)
@@ -60,6 +62,10 @@ class IndependentPPOLearner:
         return action, log_prob, probs.entropy(), value
     
     def select_action(self, obs, hidden_state, action=None, available_actions=None):
+        obs = obs.to(self.device)
+        hidden_state = hidden_state.to(self.device)
+        
+        print(self.device + "device. Maar waarom is dit dan nog wel kloppend")
         logits, next_hidden_state = self.actor(obs, hidden_state)
         
         if available_actions is not None:
@@ -93,6 +99,13 @@ class IndependentPPOLearner:
     def update4(self, obs, actions, old_logprobs, old_values, rewards, dones):
         device = next(self.actor.parameters()).device
         
+        obs = obs.to(self.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        old_logprobs = old_logprobs.to(self.device)
+        old_values = old_values.to(self.device)
+        dones = dones.to(self.device)
+        
         print("updating");
         buffer_size, max_seq_length = rewards.shape
         
@@ -112,15 +125,12 @@ class IndependentPPOLearner:
         # ----------------------------
         # RETURNS (per episode)
         # ----------------------------
-        target_returns = th.zeros_like(rewards, device=device)
-        
-        for b_index in range(buffer_size):
-            target_returns[b_index] = self.compute_nstep_returns(
-                rewards[b_index],
-                old_values[b_index],
-                mask[b_index],
-                self.args.q_nstep
-            )
+        target_returns = self.compute_nstep_returns_vectorized(
+            rewards,
+            old_values,
+            mask,
+            self.args.q_nstep
+        )
        
         print("target returns")
 
@@ -508,6 +518,55 @@ class IndependentPPOLearner:
             returns[t] = return_t
         
         return returns
+
+    def compute_nstep_returns_vectorized(self, rewards, values, mask, n_steps):
+        """
+        Gevectoriseerde versie van n-step returns voor 2D tensors [Batch, Tijd].
+        Berekent alle omgevingen tegelijk op de GPU!
+        """
+        device = next(self.actor.parameters()).device
+        B, T = rewards.shape
+        returns = th.zeros_like(rewards, device=device)
+        gamma = self.args.gamma
+
+        # Pre-computen van de discount factoren (gamma^0, gamma^1, ..., gamma^(n-1))
+        # Dit hoeven we maar één keer te doen in plaats van elke iteratie
+        gammas = th.pow(gamma, th.arange(n_steps, dtype=th.float32, device=device))
+
+        # We lopen alleen over de n_steps (bijv. 5 keer), NIET over de tijd of omgevingen!
+        for t in range(T):
+            return_t = th.zeros(B, device=device)
+            valid_mask = th.ones(B, device=device)
+            last_step = th.zeros(B, device=device)
+
+            # Lookahead loop (maximaal n_steps groot, heel snel op GPU)
+            for n_step in range(n_steps):
+                time_idx = t + n_step
+                if time_idx >= T:
+                    break
+                
+                # Update het masker: als een omgeving stopt (mask==0), stopt de optelling voor die env
+                valid_mask = valid_mask * mask[:, time_idx]
+                
+                # Voeg de discounted reward toe voor alle omgevingen tegelijk
+                return_t += valid_mask * (gammas[n_step] * rewards[:, time_idx])
+                last_step += valid_mask
+
+            # Bootstrap met de waarde van de critic (V) na n stappen
+            bootstrap_idx = t + n_steps
+            if bootstrap_idx < T:
+                # Alleen bootstrappen als we daadwerkelijk n_steps vooruit konden én de env nog actief is
+                bootstrap_condition = (mask[:, bootstrap_idx] == 1) & (last_step == n_steps)
+                bootstrap_value = (gamma ** n_steps) * values[:, bootstrap_idx]
+                
+                # Voeg toe waar de conditie True is
+                return_t += bootstrap_condition.float() * bootstrap_value
+
+            returns[:, t] = return_t
+
+        return returns
+
+        
 
         
 

@@ -194,20 +194,30 @@ def train_ippo():
 
     # 2. Create per-agent PPO learners
     agents = []
+    
+    num_gpus = torch.cuda.device_count() if args.use_cuda else 1
+    if num_gpus > 8: 
+        num_gpus = 8 # Beperk tot je 8 x A16 setup
+    
     for i in range(n_agents):
+        target_device = f"cuda:{i % num_gpus}" if args.use_cuda else "cpu"
+        
+        print(f"Initializing Agent {i} on device: {target_device}")
+        
         learner = IndependentPPOLearner(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
-            args=args
+            args=args,
+            device=target_device
         )
         agents.append(learner)
         
         if args.use_cuda:
             learner.cuda_new()
      
-    for i in range(n_agents):
-        agents[i].actor = torch.compile(agents[i].actor)
-        agents[i].critic = torch.compile(agents[i].critic) # als je select_action ook de critic gebruikt
+    #for i in range(n_agents):
+    #    agents[i].actor = torch.compile(agents[i].actor)
+    #    agents[i].critic = torch.compile(agents[i].critic) # als je select_action ook de critic gebruikt
     
     
     # 2a. Create Buffers
@@ -247,7 +257,7 @@ def train_ippo():
         #for agent in agents:
         #    agent.init_hidden_buffer(args.buffer_size)
             
-        hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(device) for agent in agents]
+        hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
         
         #for b_index, parent_conn in enumerate(parent_conns):
         #    data = parent_conn.recv()
@@ -273,9 +283,9 @@ def train_ippo():
                     action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
                     hidden_states[i] = next_hidden # Update de hidden state voor de volgende stap
                     
-                    actions_all.append(action)
-                    logp_all.append(logp)
-                    value_all.append(value)
+                    actions_all.append(action.cpu())
+                    logp_all.append(logp.cpu())
+                    value_all.append(value.cpu())
                     #actions[:, i] = action.cpu().numpy()
                     #log_probs.append(logp)
                     #log_probs = logp.cpu().numpy()
@@ -285,12 +295,12 @@ def train_ippo():
                 values = torch.stack(value_all, dim=1).squeeze(-1)
                 
                 # store buffers (still fast, no CPU sync)
-                actions_buffer[:, :, step] = actions_tensor
-                logprobs_buffer[:, :, step] = logprobs
-                values_buffer[:, :, step] = values
-                obs_buffer[:, :, step] = obs
+                actions_buffer[:, :, step] = actions_tensor.to(device)
+                logprobs_buffer[:, :, step] = logprobs.to(device)
+                values_buffer[:, :, step] = values.to(device)
+                obs_buffer[:, :, step] = obs.to(device)
                 
-                actions = actions_tensor.cpu().numpy()   # (B, n_agents)
+                actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
 
             torch.cuda.synchronize()  # Wacht tot de GPU-inference écht helemaal klaar is
             total_inference_time += (time.perf_counter() - t_start_inf)
