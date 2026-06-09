@@ -10,6 +10,7 @@ from pymarlzooplus.modules.agents import REGISTRY as actor_registry
 from pymarlzooplus.components.action_selectors import REGISTRY as action_registry
 
 from pymarlzooplus.components.standarize_stream import RunningMeanStd
+from pymarlzooplus.modules.world_model.world_models_ensemble import WorldModelsEnsemble
 
 
 class IndependentPPOWorldLearner:
@@ -138,18 +139,31 @@ class IndependentPPOWorldLearner:
         next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
         
+        print("wm_mask " + str(wm_mask.shape))
+        print("rnn_states " + str(rnn_states.shape))
+        print("current_action " + str(current_actions.shape))
+        print("current_rnn_states " + str(current_rnn_states.shape))
+        
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
             predictions = self.world_model(current_rnn_states, current_actions)
             
             #  MSE loss per model
             wm_loss = 0.0
+            
+            if wm_mask.dim() == 2:
+                wm_mask_3d = wm_mask.unsqueeze(-1) # -> [32, 499, 1]
+            else:
+                wm_mask_3d = wm_mask
+            
             for model_pred in predictions:
                 squared_errors = (model_pred - next_obs_target) ** 2
-                wm_loss += (squared_errors.sum(dim=-1, keepdim=True) * wm_mask).sum() / wm_mask.sum()
-            wm_loss = wm_loss / 5.0
+                mean_squared_errors = squared_errors.mean(dim=-1, keepdim=True) # Shape: [32, 499, 1]
+                wm_loss += (mean_squared_errors * wm_mask_3d).sum() / wm_mask_3d.sum()
+                #wm_loss += (squared_errors.sum(dim=-1, keepdim=True) * wm_mask).sum() / wm_mask.sum()
+                
+            wm_loss = wm_loss / 5.0 # 5.0 is the enumber of world models we use
             
-            # Update de gewichten van het wereldmodel
             self.world_model_optimiser.zero_grad()
             wm_loss.backward()
             th.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)

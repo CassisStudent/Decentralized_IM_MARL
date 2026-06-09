@@ -10,7 +10,7 @@ import datetime
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
-from pymarlzooplus.learners.independent_world_ppo_learner import IndependentPPOWorldLearner
+from pymarlzooplus.learners.independent_ppo_world_learner import IndependentPPOWorldLearner
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -228,14 +228,6 @@ def train_ippo():
             device=target_device
         )
         agents.append(learner)
-        
-        #if args.use_cuda:
-        #    learner.cuda_new()
-     
-    #for i in range(n_agents):
-    #    agents[i].actor = torch.compile(agents[i].actor)
-    #    agents[i].critic = torch.compile(agents[i].critic) # als je select_action ook de critic gebruikt
-    
     
     # 2a. Create Buffers
     device = next(agents[0].actor.parameters()).device
@@ -289,7 +281,7 @@ def train_ippo():
             
             t_start_inf = time.perf_counter()
         
-            hidden_states_cpu = torch.stack(hidden_states, dim=1).cpu()
+            hidden_states_cpu = torch.stack([h.cpu() for h in hidden_states], dim=1)
             hidden_states_buffer[:, :, step] = hidden_states_cpu
 
             with torch.inference_mode():
