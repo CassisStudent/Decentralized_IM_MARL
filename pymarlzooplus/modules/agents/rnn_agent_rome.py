@@ -26,6 +26,8 @@ class RNNAgentROME(nn.Module):
         assert self.is_image is False, "ROME does not support image obs for the time being!"
         if self.use_rnn is False:
             print("Running ROME Agent in MLP (Feedforward) mode without RNN!")
+        else:
+            print("Running ROME Agent in MLP (Feedforward) mode WITH RNN!")
         
         self.fc1 = nn.Linear(input_shape, args.hidden_dim)
         if self.use_rnn is True:
@@ -41,8 +43,10 @@ class RNNAgentROME(nn.Module):
 
     def init_hidden(self):
         # make hidden states on same device as model
-        
-        return self.fc1.weight.new(1, self.args.hidden_dim).zero_()
+        current_device = self.fc1.weight.device
+        #print("currentdevice in agent " + str(current_device))
+        return th.zeros(1, self.args.hidden_dim, device=current_device)
+        #return self.fc1.weight.new(1, self.args.hidden_dim).zero_()
 
     def forward(self, inputs, hidden_state):
         is_2d = (inputs.dim() == 2)
@@ -82,6 +86,8 @@ class RNNAgentROME(nn.Module):
         if is_2d:
             # [Batch, 1, Actions] -> [Batch, Actions]
             q = q.squeeze(1)
+            if self.use_rnn:
+                h = h.squeeze(0) 
 
         return q, h
 

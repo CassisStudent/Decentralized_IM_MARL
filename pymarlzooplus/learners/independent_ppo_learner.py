@@ -16,8 +16,7 @@ class IndependentPPOLearner:
     def __init__(self, obs_dimension, act_dimension, args, device="cuda:0"):#, policy, critic, args):
         self.args = args
         self.device = device if args.use_cuda else "cpu"
-        
-        print(self.device + " Device. Klopt dit wel?")
+                
         self.actor = actor_registry[self.args.agent](obs_dimension, self.args).to(self.device) ## args.agent should BE rnnAgent.
         self.actor_params = list(self.actor.parameters())
         self.actor_optimiser = Adam(params=self.actor_params, lr=args.lr)
@@ -42,6 +41,14 @@ class IndependentPPOLearner:
         #self.action_selector = action_REGISTRY[args.action_selector](args)
         
         self.hidden_state = None
+        self.world_model_ensemble = WorldModelsEnsemble(
+            state_dim=args.hidden_dim,  # Jouw GRU rnn-state grootte (bijv 64)
+            action_dim=act_dimension,   # Aantal mogelijke acties (bijv 5)
+            latent_dim=obs_dimension,   # Wat we voorspellen (de volgende observatie/latent)
+        ).to(self.device)
+        
+        self.world_model_optimiser = Adam(self.world_model.parameters(), lr=args.lr)
+
 
             
     def select_action(self, obs, action=None, available_actions=None):
@@ -65,7 +72,6 @@ class IndependentPPOLearner:
         obs = obs.to(self.device)
         hidden_state = hidden_state.to(self.device)
         
-        print(self.device + "device. Maar waarom is dit dan nog wel kloppend")
         logits, next_hidden_state = self.actor(obs, hidden_state)
         
         if available_actions is not None:
@@ -106,7 +112,6 @@ class IndependentPPOLearner:
         old_values = old_values.to(self.device)
         dones = dones.to(self.device)
         
-        print("updating");
         buffer_size, max_seq_length = rewards.shape
         
         # ----------------------------
@@ -115,12 +120,9 @@ class IndependentPPOLearner:
         mask = th.ones_like(dones, device=device)
         mask[:, 1:] = (1 - dones[:, :-1]).cumprod(dim=1)
 
-        print("mask")
         if self.args.standardise_rewards:
             self.rew_ms.update(rewards)
             rewards = (rewards - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
-
-        print("standardise rewards")
 
         # ----------------------------
         # RETURNS (per episode)
@@ -132,19 +134,13 @@ class IndependentPPOLearner:
             self.args.q_nstep
         )
        
-        print("target returns")
-
         advantages = (target_returns - old_values).detach()
         advantages = advantages * mask
-
-        print("advantage")
 
         if self.args.standardise_advantages:
             valid = advantages[mask > 0]
             advantages = (advantages - valid.mean()) / (valid.std() + 1e-8)
             advantages = advantages * mask
-
-        print(advantages.mean().item(), advantages.std().item())
         
         for k in range(self.args.epochs):            
             new_logprobs = th.zeros_like(old_logprobs, device=device)
@@ -163,19 +159,7 @@ class IndependentPPOLearner:
             
             v = self.critic(obs).squeeze(-1)
             new_values = v
-            """
-            if new_values.shape == target_returns.shape:
-                print("jjipppieee het klopt")
-                print(new_values)
-                print(target_returns)
-            else:
-                print("help nee het werkt niet")
-                print(new_values.shape)
-                print(target_returns.shape)
-            
-            print("rewards")
-            print(rewards)
-            """
+          
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
             surr1 = ratio * advantages
@@ -184,7 +168,7 @@ class IndependentPPOLearner:
             pg_loss = -th.min(surr1, surr2)
             pg_loss = (pg_loss * mask).sum() / mask.sum()
             
-            entropy_loss = -(entropies * mask).sum() / mask.sum()
+            entropy_loss = (entropies * mask).sum() / mask.sum() #Let op: heb de "min" '-' weggehaald
             actor_loss = pg_loss - self.args.entropy_coef * entropy_loss
             
             #critic loss
@@ -198,7 +182,7 @@ class IndependentPPOLearner:
             self.actor_optimiser.zero_grad()
             actor_loss.backward()
             
-            th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
+            grad_norm_actor = th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
             self.actor_optimiser.step()
             
             #optimise critic
@@ -215,6 +199,50 @@ class IndependentPPOLearner:
             print(self.hidden_state.abs().mean().item())
             print(ratio.mean().item())
             """
+            # Print alleen de eerste en de laatste epoch om het overzichtelijk te houden
+            if k == 0 or k == self.args.epochs - 1:
+                with th.no_grad():
+                    # Bereken bruikbare metrieken voor je overzicht
+                    mean_ratio = ratio.mean().item()
+                    approx_kl = (ratio - 1 - th.log(ratio)).mean().item() # Maatstaf voor stabiliteit
+                    
+                print(f"[{self.device}] Epoch {k+1}/{self.args.epochs} | "
+                      f"PG Loss: {pg_loss.item():.4f} | "
+                      f"Actor Loss: {actor_loss.item():.4f} | "
+                      f"Critic Loss: {critic_loss.item():.4f} | "
+                      f"Entropy Loss: {entropy_loss.item():.4f} | "
+                      f"Mean Ratio: {mean_ratio:.3f} | "
+                      f"Approx KL: {approx_kl:.4f}")
+        
+        #---- for logging-------#
+        with th.no_grad():
+            self.last_pg_loss = pg_loss.item()
+            self.last_actor_loss = actor_loss.item()
+            self.last_critic_loss = critic_loss.item()
+            self.last_entropy = entropy_loss.item()
+            self.last_mean_ratio = mean_ratio
+            self.last_grad_norm_actor = grad_norm_actor.item()
+
+            self.last_kl = approx_kl if 'approx_kl' in locals() else 0.0
+            
+            self.last_mean_advantage = advantages.mean().item()
+            self.last_std_advantage = advantages.std().item()
+            
+            var_y = th.var(target_returns)
+    
+            # Als de variantie 0 is (bijv. in de allereerste stap), is de score NaN
+            if var_y == 0:
+                self.last_explained_var = 0.0
+            else:
+                # Formule: 1 - Var(Return - Prediction) / Var(Return)
+                # We gebruiken .detach() om te zorgen dat we geen gradients meetrekken
+                residual_var = th.var(target_returns.detach() - new_values.detach())
+                self.last_explained_var = (1 - residual_var / var_y).item()
+            
+            
+        
+        # Scheidingslijn na de volledige update van deze agent
+        print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
     
     def update3(self, obs, actions, old_logprobs, old_values, rewards, dones):
         device = next(self.actor.parameters()).device
@@ -739,18 +767,27 @@ class IndependentPPOLearner:
         self.critic.cuda()
         self.target_critic.cuda()
 
-    def save_models(self, path):
-        self.mac.save_models(path)
-        th.save(self.critic.state_dict(), "{}/critic.th".format(path))
-        th.save(self.actor_optimiser.state_dict(), "{}/actor_opt.th".format(path))
-        th.save(self.critic_optimiser.state_dict(), "{}/critic_opt.th".format(path))
+    def save_models(self, path, agent_id):
+        th.save(self.actor.state_dict(), "{}/actor_agent_{}.th".format(path, agent_id))
+        th.save(self.critic.state_dict(), "{}/critic_agent_{}.th".format(path, agent_id))
+        th.save(self.actor_optimiser.state_dict(), "{}/actor_opt_agent_{}.th".format(path, agent_id))
+        th.save(self.critic_optimiser.state_dict(), "{}/critic_opt_agent_{}.th".format(path, agent_id))
 
-    def load_models(self, path):
-        self.mac.load_models(path)
-        self.critic.load_state_dict(th.load("{}/critic.th".format(path), map_location=lambda storage, loc: storage))
-        # Not quite right, but I don't want to save target networks
+    def load_models(self, path, agent_id):
+        # Laad de unieke bestanden in op de JUISTE GPU (self.device) waar de agent leeft
+        self.actor.load_state_dict(
+            th.load("{}/actor_agent_{}.th".format(path, agent_id), map_location=self.device)
+        )
+        self.critic.load_state_dict(
+            th.load("{}/critic_agent_{}.th".format(path, agent_id), map_location=self.device)
+        )
+        
+        # Synchroniseer de target critic direct
         self.target_critic.load_state_dict(self.critic.state_dict())
+        
         self.actor_optimiser.load_state_dict(
-            th.load("{}/actor_opt.th".format(path), map_location=lambda storage, loc: storage))
+            th.load("{}/actor_opt_agent_{}.th".format(path, agent_id), map_location=self.device)
+        )
         self.critic_optimiser.load_state_dict(
-            th.load("{}/critic_opt.th".format(path), map_location=lambda storage, loc: storage))
+            th.load("{}/critic_opt_agent_{}.th".format(path, agent_id), map_location=self.device)
+        )

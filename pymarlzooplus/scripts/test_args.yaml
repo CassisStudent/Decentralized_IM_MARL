@@ -22,7 +22,7 @@ env_args: {
 
 
 
-t_max: 15000
+t_max: 100000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
@@ -53,14 +53,21 @@ eps_clip: 0.2 #called clip_coef in cleanrl. It is the same in cleanrl.
 entropy_coef: 0.01 #called ent_coef: float = 0.01. It is same in cleanrl
 
 # I CHANGED THIS TO TRUE. CORRESPONDS probablly TO NORM_ADV IN CLEANRL
-standardise_returns: True  #"""Toggles advantages normalization"""
-standardise_rewards: False
-standardise_advantages: True #Staat niet in cleanrl/pymarlzooplus
+standardise_returns: False  #"""Toggles advantages normalization""" #dit was true
+standardise_rewards: True # dit was false
+standardise_advantages: True #Staat niet in cleanrl/pymarlzooplus. Dit is nu op false gezet voor testing
 
 name: "ippo_ns"
-use_rnn: False
+use_rnn: True #Beter met True, maar veel langzamer
 
+#-------------------Intrinsic motivation-----------
+wm_epochs: 4 #epochs for training world models ensemble
+beta: 0.1
 
+#--------------------------Logging---------------------
+save_model: True # Save the models to disk
+save_model_interval: 50000 # Save models after this many timesteps
+log_interval: 50000 
 
 
 n_agents: -1 #Dit boeit volgens mij echt geen reet, maar moet RNNagent hebben blijkbaar.

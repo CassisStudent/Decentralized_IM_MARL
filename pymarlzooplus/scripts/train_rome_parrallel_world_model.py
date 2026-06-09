@@ -10,7 +10,7 @@ import datetime
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
-from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
+from pymarlzooplus.learners.independent_world_ppo_learner import IndependentPPOWorldLearner
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -221,7 +221,7 @@ def train_ippo():
         
         print(f"Initializing Agent {i} on device: {target_device}")
         
-        learner = IndependentPPOLearner(
+        learner = IndependentPPOWorldLearner(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
             args=args,
@@ -248,6 +248,8 @@ def train_ippo():
     logprobs_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, device=device)
     values_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, device=device)
     
+    hidden_states_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, args.hidden_dim).pin_memory()
+    
     obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, device=device)
 
     print("obs_buffer.shape: " + str(obs_buffer.shape))
@@ -272,18 +274,8 @@ def train_ippo():
             
         torch.cuda.synchronize()
         obs = shared_obs.to(device)
-        
-        # Init hidden state agent: (memory of of this episode)
-        #for agent in agents:
-        #    agent.init_hidden_buffer(args.buffer_size)
             
         hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
-        
-        #for b_index, parent_conn in enumerate(parent_conns):
-        #    data = parent_conn.recv()
-        #    obs[b_index] = torch.from_numpy(data["obs"]).to(device)
-        
-        #init_data_samples = [conn.recv() for conn in parent_conns]
 
         total_inference_time = 0
         total_env_comm_time = 0
@@ -295,26 +287,24 @@ def train_ippo():
             logp_all = []
             value_all = []
             
-            #torch.cuda.synchronize() # Zorg dat GPU leeg is voor de start
             t_start_inf = time.perf_counter()
         
+            hidden_states_cpu = torch.stack(hidden_states, dim=1).cpu()
+            hidden_states_buffer[:, :, step] = hidden_states_cpu
+
             with torch.inference_mode():
                 for i in range(n_agents):
                     action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
-                    hidden_states[i] = next_hidden # Update de hidden state voor de volgende stap
+                    hidden_states[i] = next_hidden
                     
                     actions_all.append(action.cpu())
                     logp_all.append(logp.cpu())
                     value_all.append(value.cpu())
-                    #actions[:, i] = action.cpu().numpy()
-                    #log_probs.append(logp)
-                    #log_probs = logp.cpu().numpy()
                 
                 actions_tensor = torch.stack(actions_all, dim=1)
                 logprobs = torch.stack(logp_all, dim=1)
                 values = torch.stack(value_all, dim=1).squeeze(-1)
                 
-                # store buffers (still fast, no CPU sync)
                 actions_buffer[:, :, step] = actions_tensor.to(device)
                 logprobs_buffer[:, :, step] = logprobs.to(device)
                 values_buffer[:, :, step] = values.to(device)
@@ -322,17 +312,9 @@ def train_ippo():
                 
                 actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
 
-            torch.cuda.synchronize()  # Wacht tot de GPU-inference écht helemaal klaar is
+            torch.cuda.synchronize()
             total_inference_time += (time.perf_counter() - t_start_inf)
-    
-                        
-                    #actions_buffer[:, i, step] = action.detach()
-                    #logprobs_buffer[:, i, step] = logp.detach()
-                    #values_buffer[:, i, step] =  value.detach()
-                    #obs_buffer[:, i, step] = obs[:, i]
-            
-            # 4
-            # Create tasks only for active, non-terminated environments
+
             active_envs = []
             t_start_env = time.perf_counter()
             
@@ -352,7 +334,6 @@ def train_ippo():
             
             t_start_buffer = time.perf_counter()
 
-            # Process results sequentially once all concurrent recvs finish
             obs = shared_obs.to(device, non_blocking=True)
             rewards_buffer[:, step] = shared_rewards
             dones_buffer[:, step] = shared_dones
@@ -384,8 +365,7 @@ def train_ippo():
         print("=============================================\n")
     
         with torch.inference_mode():
-            # rewards_buffer heeft shape [buffer_size, max_seq_length]
-            # We berekenen het gemiddelde over alle 32 parallelle omgevingen heen
+            # gemiddelde van 32 omgevingen
             mean_episode_reward = rewards_buffer.sum(dim=1).mean().item()
             
         print(f"GEMIDDELDE EPISODIC RETURN (REWARDS): {mean_episode_reward:.2f}")
@@ -404,7 +384,8 @@ def train_ippo():
                 logprobs_buffer[:, i],
                 values_buffer[:, i],
                 rewards_buffer,
-                dones_buffer
+                dones_buffer,
+                hidden_states_buffer[:, i]
             )
         #episode_index = 0
         env_steps_this_run = 0
@@ -415,11 +396,10 @@ def train_ippo():
         values_buffer.zero_()
         rewards_buffer.zero_()
         dones_buffer.zero_()
-        
+        hidden_states_buffer.zero_()
         
         
         # --- MODEL SAVING ---
-        # args.save_model_interval kan bijvoorbeeld 50.000 stappen zijn
         if args.save_model and (t_environment - model_save_time >= args.save_model_interval or t_environment >= args.t_max):
             model_save_time = t_environment
     
@@ -435,10 +415,8 @@ def train_ippo():
         if (t_environment - last_log_T) >= args.log_interval or t_environment >= args.t_max:
             last_log_T = t_environment
             
-            # Groep 1: Team Prestaties (De primaire grafiek voor je paper)
             writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
             
-            # Groep 2: Individuele Agent Analyse (Voor je appendix of sub-plots)
             for i in range(n_agents):
                 agent = agents[i]
                 if hasattr(agent, 'last_pg_loss'):
@@ -459,8 +437,6 @@ def train_ippo():
             print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
     
     
-    
-    
     #Final save
     final_save_path = os.path.join("results", "models", "final")
     os.makedirs(final_save_path, exist_ok=True)
@@ -476,7 +452,7 @@ def train_ippo():
 
     for p in processes:
         p.join()
-    
+
 
 
 
@@ -565,7 +541,7 @@ def probe_env(env_fn, env_arg):
     env_info = env.get_env_info()
     env.close()
     return env_info
-            
+
 
 class CloudpickleWrapper:
     """

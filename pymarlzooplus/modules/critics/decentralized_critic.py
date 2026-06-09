@@ -66,14 +66,14 @@ class DecentralizedCritic(nn.Module):
         for i in range(1, self.n_agents):
             params += list(self.critics[i].parameters())
         return params
-    """
+    
     def state_dict(self):
         return [a.state_dict() for a in self.critics]
 
     def load_state_dict(self, state_dict):
         for i, a in enumerate(self.critics):
             a.load_state_dict(state_dict[i])
-
+    """
     """
     def cuda(self):
         for c in self.critics:

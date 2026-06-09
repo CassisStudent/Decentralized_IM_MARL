@@ -13,6 +13,8 @@ from pymarlzooplus.rl_video_recorder import RLVideoRecorder
 from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
 from pymarlzooplus.utils.logging_setup import Logger
 
+from torch.utils.tensorboard import SummaryWriter
+
 from torch.multiprocessing import Process, Pipe
 from functools import partial
 import time
@@ -124,6 +126,9 @@ def train_ippo():
     if torch.multiprocessing.get_start_method(allow_none=True) is None:
         torch.multiprocessing.set_start_method('spawn')
     
+    #-----------Logging-------------------:
+    log_dir = os.path.join("results", "tb_logs", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    writer = SummaryWriter(log_dir=log_dir)
     
     # 1a. Get config (TODO LETS CHECK ON SEED)
     _config = read_config()
@@ -134,7 +139,14 @@ def train_ippo():
     
     args = SN(**_config)
     
+    num_gpus = torch.cuda.device_count() if args.use_cuda else 1
+    if num_gpus > 8: 
+        num_gpus = 8 # Beperk tot je 8 x A16 setup
+    
     args.device = "cuda" if args.use_cuda else "cpu"
+    if args.use_cuda and num_gpus > 1:
+        args.device = "cuda:1"
+
     args.device_cnn_modules = "cuda" if args.use_cuda_cnn_modules else "cpu"
     torch.backends.cudnn.benchmark = True
     
@@ -195,12 +207,17 @@ def train_ippo():
     # 2. Create per-agent PPO learners
     agents = []
     
-    num_gpus = torch.cuda.device_count() if args.use_cuda else 1
-    if num_gpus > 8: 
-        num_gpus = 8 # Beperk tot je 8 x A16 setup
+    
     
     for i in range(n_agents):
-        target_device = f"cuda:{i % num_gpus}" if args.use_cuda else "cpu"
+        if num_gpus > 1:
+            # Sla GPU 0 over! We verdelen over cuda:1 t/m cuda:3 (of t/m cuda:7 als je meer agents hebt)
+            target_gpu_id = 1 + (i % (num_gpus - 1))
+            target_device = f"cuda:{target_gpu_id}"
+        else:
+            target_device = "cuda:0"
+        
+        #target_device = f"cuda:{i % num_gpus}" if args.use_cuda else "cpu"
         
         print(f"Initializing Agent {i} on device: {target_device}")
         
@@ -212,8 +229,8 @@ def train_ippo():
         )
         agents.append(learner)
         
-        if args.use_cuda:
-            learner.cuda_new()
+        #if args.use_cuda:
+        #    learner.cuda_new()
      
     #for i in range(n_agents):
     #    agents[i].actor = torch.compile(agents[i].actor)
@@ -239,6 +256,9 @@ def train_ippo():
     t_environment = 0
     env_steps_this_run = 0
     episode_index = 0
+    
+    model_save_time = 0
+    last_log_T = 0
     
     while t_environment < args.t_max:
         terminated = torch.zeros(args.buffer_size, dtype=torch.bool)
@@ -362,6 +382,14 @@ def train_ippo():
           "comm": total_env_comm_time
         })
         print("=============================================\n")
+    
+        with torch.inference_mode():
+            # rewards_buffer heeft shape [buffer_size, max_seq_length]
+            # We berekenen het gemiddelde over alle 32 parallelle omgevingen heen
+            mean_episode_reward = rewards_buffer.sum(dim=1).mean().item()
+            
+        print(f"GEMIDDELDE EPISODIC RETURN (REWARDS): {mean_episode_reward:.2f}")
+        print(f"======================================================\n")
 
         
         #episode_index += 1
@@ -388,11 +416,68 @@ def train_ippo():
         rewards_buffer.zero_()
         dones_buffer.zero_()
         
+        
+        
+        # --- MODEL SAVING ---
+        # args.save_model_interval kan bijvoorbeeld 50.000 stappen zijn
+        if args.save_model and (t_environment - model_save_time >= args.save_model_interval or t_environment >= args.t_max):
+            model_save_time = t_environment
+    
+            save_path = os.path.join("results", "models", str(t_environment))
+            os.makedirs(save_path, exist_ok=True)
+
+            for i in range(n_agents):
+                agents[i].save_models(save_path, agent_id=i)
+            print(f"[CHECKPOINT] Modellen succesvol opgeslagen bij stap {t_environment}")
+
+        
+        # ----- LOGGING --------
+        if (t_environment - last_log_T) >= args.log_interval or t_environment >= args.t_max:
+            last_log_T = t_environment
+            
+            # Groep 1: Team Prestaties (De primaire grafiek voor je paper)
+            writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
+            
+            # Groep 2: Individuele Agent Analyse (Voor je appendix of sub-plots)
+            for i in range(n_agents):
+                agent = agents[i]
+                if hasattr(agent, 'last_pg_loss'):
+                    writer.add_scalar(f"Agent_{i}/Policy_Loss", agent.last_pg_loss, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Actor_Loss", agent.last_actor_loss, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Critic_Loss", agent.last_critic_loss, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Entropy", agent.last_entropy, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Mean_Ratio", agent.last_mean_ratio, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Grad_Norm_Actor", agent.last_grad_norm_actor, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Approx_KL", agent.last_kl, t_environment)
+                    
+                    writer.add_scalar(f"Agent_{i}/Mean_Advantage", agent.last_mean_advantage, t_environment)
+                    writer.add_scalar(f"Agent_{i}/STD_Advantage", agent.last_std_advantage, t_environment)
+                    
+                    writer.add_scalar(f"Agent_{i}/Explained_Variance", agent.last_explained_var, t_environment)
+            
+            writer.flush()
+            print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
+    
+    
+    
+    
+    #Final save
+    final_save_path = os.path.join("results", "models", "final")
+    os.makedirs(final_save_path, exist_ok=True)
+
+    for i in range(n_agents):
+        agents[i].save_models(final_save_path, agent_id=i)
+    print(f"Training voltooid! Eindmodellen succesvol opgeslagen in: {final_save_path}")
+        
+    
+    
     for conn in parent_conns:
         conn.send(("close", None))
 
     for p in processes:
         p.join()
+    
+
 
 
 def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewards, shared_dones):
