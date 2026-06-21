@@ -22,7 +22,7 @@ env_args: {
 
 
 
-t_max: 100000
+t_max: 7000000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
@@ -49,7 +49,6 @@ buffer_size: 32 #IN cleanrl 128 steps and minibatches van 32 steps groot. In PyM
 
 q_nstep: 5 # 1 corresponds to normal r + gammaV
 epochs: 4
-wm_epochs: 4 #epochs for training world models ensemble
 eps_clip: 0.2 #called clip_coef in cleanrl. It is the same in cleanrl.
 entropy_coef: 0.01 #called ent_coef: float = 0.01. It is same in cleanrl
 
@@ -60,6 +59,10 @@ standardise_advantages: True #Staat niet in cleanrl/pymarlzooplus. Dit is nu op 
 
 name: "ippo_ns"
 use_rnn: True #Beter met True, maar veel langzamer
+
+#-------------------Intrinsic motivation-----------
+wm_epochs: 4 #epochs for training world models ensemble
+beta: 0.1
 
 #--------------------------Logging---------------------
 save_model: True # Save the models to disk

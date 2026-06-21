@@ -284,6 +284,7 @@ def train_ippo():
             hidden_states_cpu = torch.stack([h.cpu() for h in hidden_states], dim=1)
             hidden_states_buffer[:, :, step] = hidden_states_cpu
 
+            # Select an action and save in buffers
             with torch.inference_mode():
                 for i in range(n_agents):
                     action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
@@ -310,6 +311,7 @@ def train_ippo():
             active_envs = []
             t_start_env = time.perf_counter()
             
+            #step in each environment
             for idx, parent_conn in enumerate(parent_conns):
                 if not terminated[idx]:
                     parent_conn.send(("step", actions[idx]))
@@ -317,23 +319,23 @@ def train_ippo():
 
             total_env_comm_time += (time.perf_counter() - t_start_env)
             
-            
+            #Receive all the info from the step
             t_start_recv = time.perf_counter()
             for idx in active_envs:
                 parent_conns[idx].recv()
                 
             total_env_recv_time += (time.perf_counter() - t_start_recv)
-            
+    
             t_start_buffer = time.perf_counter()
 
+            #Safe information in buffers
             obs = shared_obs.to(device, non_blocking=True)
             rewards_buffer[:, step] = shared_rewards
             dones_buffer[:, step] = shared_dones
-            
             terminated |= shared_dones
             
             env_steps_this_run += len(active_envs)
-            
+        
             total_buffer_time += (time.perf_counter() - t_start_buffer)
 
             if terminated.all():
@@ -367,6 +369,7 @@ def train_ippo():
         #episode_index += 1
         t_environment += env_steps_this_run
 
+        #---------------UPDATING-----------------------
         # 4. PPO update per agent (OUTSIDE OF EPISODE LOOP)
         #if episode_index == args.buffer_size:
         for i in range(n_agents):
@@ -382,6 +385,7 @@ def train_ippo():
         #episode_index = 0
         env_steps_this_run = 0
 
+        #resetting buffers
         obs_buffer.zero_()
         actions_buffer.zero_()
         logprobs_buffer.zero_()
@@ -409,6 +413,7 @@ def train_ippo():
             
             writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
             
+            
             for i in range(n_agents):
                 agent = agents[i]
                 if hasattr(agent, 'last_pg_loss'):
@@ -424,7 +429,12 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/STD_Advantage", agent.last_std_advantage, t_environment)
                     
                     writer.add_scalar(f"Agent_{i}/Explained_Variance", agent.last_explained_var, t_environment)
-            
+                    
+                    writer.add_scalar(f"Agent_{i}/World_Model_Loss", agent.last_wm_loss, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Mean", agent.last_intrinsic_raw_mean, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Std", agent.last_intrinsic_raw_std, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
+
             writer.flush()
             print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
     

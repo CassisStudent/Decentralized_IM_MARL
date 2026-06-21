@@ -138,12 +138,12 @@ class IndependentPPOWorldLearner:
         current_actions = actions_one_hot[:, :-1]        
         next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
-        
+        """
         print("wm_mask " + str(wm_mask.shape))
         print("rnn_states " + str(rnn_states.shape))
         print("current_action " + str(current_actions.shape))
         print("current_rnn_states " + str(current_rnn_states.shape))
-        
+        """
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
             predictions = self.world_model(current_rnn_states, current_actions)
@@ -270,7 +270,7 @@ class IndependentPPOWorldLearner:
                     raw_intrinsic_std = valid_rewards.std().item() + 1e-8
                     
                     current_wm_loss = wm_loss.item() #mean loss van de 5 models
-                    
+                """    
                 print(f"[{self.device}] Epoch {k+1}/{self.args.epochs} | "
                       f"PG Loss: {pg_loss.item():.4f} | "
                       f"WM Loss: {current_wm_loss:.4f} | "
@@ -281,6 +281,7 @@ class IndependentPPOWorldLearner:
                       f"Entropy Loss: {entropy_loss.item():.4f} | "
                       f"Mean Ratio: {mean_ratio:.3f} | "
                       f"Approx KL: {approx_kl:.4f}")
+                """
             
         
         #---- for logging-------#
@@ -311,11 +312,19 @@ class IndependentPPOWorldLearner:
             #-------- TODO----------
             # SAVE INTRINSIC REAWRDS LOGS
             #--------------------------
+            self.last_wm_loss = current_wm_loss
+            self.last_intrinsic_raw_mean = raw_intrinsic_mean
+            self.last_intrinsic_raw_std = raw_intrinsic_std
+            
+            # Sla ook de bèta op, handig als je later met decay gaat testen
+            self.last_beta = self.args.beta
+            
+            
             
             
         
         # Scheidingslijn na de volledige update van deze agent
-        print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
+        #print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
     
             
     def compute_nstep_returns(self, rewards, values, mask, n_steps):

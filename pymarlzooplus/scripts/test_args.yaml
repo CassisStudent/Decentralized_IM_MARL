@@ -22,7 +22,7 @@ env_args: {
 
 
 
-t_max: 100000
+t_max: 7000000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
