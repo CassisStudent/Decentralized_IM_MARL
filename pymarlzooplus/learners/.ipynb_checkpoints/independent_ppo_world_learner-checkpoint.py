@@ -92,6 +92,22 @@ class IndependentPPOWorldLearner:
         # misschien #action.item()?
         return action, log_prob, probs.entropy(), value, next_hidden_state
     
+    def select_action_logits(self, obs, hidden_state, action=None, available_actions=None):
+        obs = obs.to(self.device)
+        hidden_state = hidden_state.to(self.device)
+        
+        logits, next_hidden_state = self.actor(obs, hidden_state)
+        
+        if available_actions is not None:
+            logits[available_actions == 0] = -1e10  # mask invalid actions
+        
+        action = th.argmax(logits, dim=-1).item()
+    
+        value = self.critic(obs)
+        
+        # misschien #action.item()?
+        return action, value, next_hidden_state
+    
     def get_logprobs(self, obs, action, available_actions=None):
         logits, self.hidden_state = self.actor(obs, self.hidden_state)
         if available_actions is not None:

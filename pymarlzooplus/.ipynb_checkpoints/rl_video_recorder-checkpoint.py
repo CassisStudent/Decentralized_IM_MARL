@@ -23,8 +23,8 @@ class RLVideoRecorder:
         if frame is not None:
             self.frames.append(frame)
     
-    def save_video(self):
-        imageio.mimwrite("pymarlzooplus/videos/episode2.mp4", self.frames, format='FFMPEG', fps=10)
+    def save_video(self, index):
+        imageio.mimwrite(f"videos/episode_{index}.mp4", self.frames, format='FFMPEG', fps=10)
     
     def reset_frames_buffer(self):
         self.frames = []

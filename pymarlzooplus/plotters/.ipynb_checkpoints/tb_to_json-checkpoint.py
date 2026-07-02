@@ -3,8 +3,9 @@ import glob
 import json
 from tensorboard.backend.event_processing import event_accumulator
 
-# 1. Zoek naar je TensorBoard logbestanden
-log_dir = "../results/tb_logs/"  # Pas dit aan naar de exacte map waar je logs worden weggeschreven
+run_name = "moa_20260630-142320"
+# 1. Zoek naar je logbestand
+log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)
 
 if not event_files:
@@ -12,7 +13,7 @@ if not event_files:
     exit()
 
 # Pak het eerste/meest recente bestand
-target_file = event_files[3]
+target_file = event_files[0]
 print(f"Bezig met converteren van: {target_file}")
 
 # 2. Laad de binaire data in
@@ -35,7 +36,7 @@ for tag in ea.Tags()['scalars']:
         })
 
 # 4. Schrijf de data weg naar een JSON-bestand
-output_json = "raw_training_metrics.json"
+output_json = "images/" + run_name + "/raw_training_metrics.json"
 with open(output_json, "w") as f:
     json.dump(raw_data_dict, f, indent=4)
 

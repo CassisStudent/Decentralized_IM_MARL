@@ -10,10 +10,11 @@ from pymarlzooplus.modules.agents import REGISTRY as actor_registry
 from pymarlzooplus.components.action_selectors import REGISTRY as action_registry
 
 from pymarlzooplus.components.standarize_stream import RunningMeanStd
-from pymarlzooplus.modules.world_model.world_models_ensemble import WorldModelsEnsemble
+from pymarlzooplus.modules.world_model.world_models_ensemble_moa import WorldModelsEnsembleMOA
+from pymarlzooplus.modules.world_model.moa import MOA_LSTM
 
 
-class IndependentPPOWorldLearner:
+class IndependentPPOWorldLearnerMOA:
     def __init__(self, obs_dimension, act_dimension, args, device="cuda:0"):#, policy, critic, args):
         self.args = args
         self.device = device if args.use_cuda else "cpu"
@@ -42,9 +43,11 @@ class IndependentPPOWorldLearner:
         #self.action_selector = action_REGISTRY[args.action_selector](args)
         
         self.hidden_state = None
-        self.world_model = WorldModelsEnsemble(
+        total_action_dim = self.args.n_actions * self.args.n_agents
+        
+        self.world_model = WorldModelsEnsembleMOA(
             state_dim=args.hidden_dim,  # rnn-state
-            action_dim=act_dimension,   # number of actions
+            combined_action_dim=total_action_dim,   # number of actions
             latent_dim=obs_dimension,   # the prediction of the next state
         ).to(self.device)
         
@@ -53,6 +56,15 @@ class IndependentPPOWorldLearner:
             lr=3e-4, 
             weight_decay=1e-4
         )
+        
+        self.moa = MOA_LSTM(
+            obs_dim=obs_dimension,
+            my_action_dim=act_dimension,
+            partner_action_dim=act_dimension, #LET OP. GAAT ERVAN UIT DAT ALLE AGENTS DEZELFDE ACTIONSPACE HEBBEN 
+            n_partners=self.args.n_agents - 1
+        ).to(self.device)
+        
+        self.moa_optimiser = Adam(params=self.moa.parameters(), lr=self.args.lr_moa)
 
     """        
     def select_action(self, obs, action=None, available_actions=None):
@@ -123,7 +135,7 @@ class IndependentPPOWorldLearner:
     def init_hidden_buffer(self, buffer_size):
         self.hidden_state = self.actor.init_hidden().expand(buffer_size, -1).contiguous()
     
-    def update4(self, obs, actions, old_logprobs, old_values, rewards, dones, rnn_states):
+    def update4(self, obs, actions, old_logprobs, old_values, rewards, dones, rnn_states, team_actions, t_environment):
         rnn_states = rnn_states.to(self.device)
         
         device = next(self.actor.parameters()).device
@@ -134,24 +146,42 @@ class IndependentPPOWorldLearner:
         old_logprobs = old_logprobs.to(self.device)
         old_values = old_values.to(self.device)
         dones = dones.to(self.device)
+        team_actions = team_actions.to(self.device)        
         
         buffer_size, max_seq_length = rewards.shape
         
         # ----------------------------
         # MASK
         # ----------------------------
+        #print("dones,", dones)
         mask = th.ones_like(dones, device=device)
         mask[:, 1:] = (1 - dones[:, :-1]).cumprod(dim=1)
         
+        #print("mask,", mask)
         # =====================================================================
         # STAP 1: WORLD MODEL UPDATE (before PPO Berekeningen)
         # =====================================================================
         action_dim = self.args.n_actions
         actions_one_hot = th.nn.functional.one_hot(actions.squeeze(-1).long(), num_classes=action_dim).float()
+        
+        ##===============================
+        # STAP 1A; MOA UPDATE
+        #================================
+        team_actions_one_hot = th.nn.functional.one_hot(team_actions.long(), num_classes=action_dim).float()
+        team_actions_one_hot_flat = team_actions_one_hot.view(buffer_size, max_seq_length, (self.args.n_agents - 1) * action_dim)
+        
+        all_actions_one_hot = th.cat([actions_one_hot, team_actions_one_hot_flat], dim=-1)
+        
+        moa_input_obs = obs[:, :-1]
+        moa_input_actions = all_actions_one_hot[:, :-1]
+        moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1?
+        
+        
 
         # cut-off
         current_rnn_states = rnn_states[:, :-1]
-        current_actions = actions_one_hot[:, :-1]        
+        current_my_actions = actions_one_hot[:, :-1]
+        all_current_actions = moa_input_actions
         next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
         """
@@ -160,17 +190,42 @@ class IndependentPPOWorldLearner:
         print("current_action " + str(current_actions.shape))
         print("current_rnn_states " + str(current_rnn_states.shape))
         """
+        
+        if wm_mask.dim() == 2:
+            wm_mask_3d = wm_mask.unsqueeze(-1) # -> [32, 499, 1]
+        else:
+            wm_mask_3d = wm_mask
+        
+        
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
-            predictions = self.world_model(current_rnn_states, current_actions)
+            next_action_logits, _ = self.moa(moa_input_obs, moa_input_actions)
+            
+            moa_loss_flat = th.nn.functional.cross_entropy(
+                next_action_logits.view(-1, action_dim),
+                moa_target_partners.contiguous().view(-1).long(),
+                reduction="none"
+            ).view(buffer_size, max_seq_length - 1, self.args.n_agents - 1)
+            
+            moa_loss = (moa_loss_flat * wm_mask_3d).sum() / wm_mask_3d.sum()
+            moa_loss = moa_loss * self.args.moa_loss_weight # scaling conform paper (bijv. 10.0). #DIT MOET NOG IN  DE TEST_ARGS KOMEN TE STAAN DAN....
+            self.moa_optimiser.zero_grad()
+            moa_loss.backward()
+            th.nn.utils.clip_grad_norm_(self.moa.parameters(), max_norm=0.5) #VERANDER DE MAX_NORM NOG NAAR EEN  GOED GETAL?
+            self.moa_optimiser.step()
+
+            #predicted next actions for world_model;
+            with th.no_grad():
+                current_logits, _ = self.moa(moa_input_obs, moa_input_actions)
+                moa_probs = th.nn.functional.softmax(current_logits, dim=-1)
+                # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
+                moa_probs_flat = moa_probs.view(buffer_size, max_seq_length - 1, -1).detach()
+                
+            wm_combined_actions_input = th.cat([current_my_actions, moa_probs_flat], dim=-1)
+            predictions = self.world_model(current_rnn_states, wm_combined_actions_input)
             
             #  MSE loss per model
             wm_loss = 0.0
-            
-            if wm_mask.dim() == 2:
-                wm_mask_3d = wm_mask.unsqueeze(-1) # -> [32, 499, 1]
-            else:
-                wm_mask_3d = wm_mask
             
             for model_pred in predictions:
                 squared_errors = (model_pred - next_obs_target) ** 2
@@ -189,7 +244,7 @@ class IndependentPPOWorldLearner:
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
         # =====================================================================
         with th.no_grad():
-            intrinsic_reward = self.world_model.get_intrinsic_reward(current_rnn_states, current_actions)
+            intrinsic_reward = self.world_model.get_intrinsic_reward(current_rnn_states, wm_combined_actions_input)
             
             # Normalisatie
             valid_rewards = intrinsic_reward[wm_mask.bool()]
@@ -200,7 +255,8 @@ class IndependentPPOWorldLearner:
             intrinsic_reward_norm = (intrinsic_reward - reward_mean) / reward_std
             
             full_intrinsic = th.zeros_like(rewards)
-            full_intrinsic[:, :-1] = intrinsic_reward_norm
+            if t_environment > 200000:
+                full_intrinsic[:, :-1] = intrinsic_reward_norm
         
         total_rewards = rewards + self.args.beta * full_intrinsic
 
@@ -217,7 +273,11 @@ class IndependentPPOWorldLearner:
             mask,
             self.args.q_nstep
         )
-       
+        """
+        print("rewards mean per step:", rewards.mean())
+        print("rewards sum per episode:", rewards.sum(dim=1).mean())
+        print("target_returns mean:", target_returns.mean())
+        """
         advantages = (target_returns - old_values).detach()
         advantages = advantages * mask
 
@@ -226,6 +286,9 @@ class IndependentPPOWorldLearner:
             advantages = (advantages - valid.mean()) / (valid.std() + 1e-8)
             advantages = advantages * mask
         
+        
+        
+        #print("obs.shape" + str(obs.shape))
         for k in range(self.args.epochs):            
             new_logprobs = th.zeros_like(old_logprobs, device=device)
             entropies = th.zeros_like(old_logprobs, device=device)
@@ -265,7 +328,10 @@ class IndependentPPOWorldLearner:
             # Optimise agents
             self.actor_optimiser.zero_grad()
             actor_loss.backward()
-            
+            """
+            print("New values", new_values.mean(), new_values.std())
+            print("target returns", target_returns.mean(), target_returns.std())
+            """
             grad_norm_actor = th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
             self.actor_optimiser.step()
             
@@ -278,6 +344,18 @@ class IndependentPPOWorldLearner:
 
             # print first and last epoch
             if k == 0 or k == self.args.epochs - 1:
+                """
+                print("ratio mean", ratio.mean().item())
+                print("ratio std", ratio.std().item())
+                print("old logprob mean", old_logprobs.mean())
+                print("new logprob mean", new_logprobs.mean())
+
+                diff = (new_logprobs - old_logprobs)
+
+                print("diff mean", diff.mean())
+                print("diff abs mean", diff.abs().mean())
+                print("diff max", diff.abs().max())
+                """
                 with th.no_grad():
                     mean_ratio = ratio.mean().item()
                     approx_kl = (ratio - 1 - th.log(ratio)).mean().item() # stability measure
@@ -401,17 +479,21 @@ class IndependentPPOWorldLearner:
                 # Voeg de discounted reward toe voor alle omgevingen tegelijk
                 return_t += valid_mask * (gammas[n_step] * rewards[:, time_idx])
                 last_step += valid_mask
-
-            # Bootstrap met de waarde van de critic (V) na n stappen
+            
+            
             bootstrap_idx = t + n_steps
+            
             if bootstrap_idx < T:
-                # Alleen bootstrappen als we daadwerkelijk n_steps vooruit konden én de env nog actief is
-                bootstrap_condition = (mask[:, bootstrap_idx] == 1) & (last_step == n_steps)
+                bootstrap_mask = mask[:, bootstrap_idx]
                 bootstrap_value = (gamma ** n_steps) * values[:, bootstrap_idx]
-                
-                # Voeg toe waar de conditie True is
-                return_t += bootstrap_condition.float() * bootstrap_value
+                return_t += bootstrap_mask * bootstrap_value
 
+            else:
+                bootstrap_mask = mask[:, -1]
+                bootstrap_value = (gamma ** (T - t)) * values[:, -1]
+                return_t += bootstrap_mask * bootstrap_value
+
+                
             returns[:, t] = return_t
 
         return returns

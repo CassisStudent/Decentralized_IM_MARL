@@ -16,7 +16,7 @@ env: "pressureplate"
 env_args: {
     key: "pressureplate-linear-4p-v0",
     time_limit: 500,
-    render: False,
+    render: True,
     seed: 2024
 }
 
@@ -63,6 +63,10 @@ use_rnn: True #Beter met True, maar veel langzamer
 #-------------------Intrinsic motivation-----------
 wm_epochs: 4 #epochs for training world models ensemble
 beta: 0.1
+
+#------------------MOA----------------------------
+lr_moa: 0.001
+moa_loss_weight: 10
 
 #--------------------------Logging---------------------
 save_model: True # Save the models to disk

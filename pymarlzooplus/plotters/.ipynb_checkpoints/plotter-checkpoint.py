@@ -18,7 +18,7 @@ for f in event_files:
     print(f" - {f}")
 
 # We pakken de meest recente of de eerste file om uit te lezen
-target_file = event_files[3]
+target_file = event_files[8]
 print(f"\nBezig met uitlezen van: {target_file}")
 
 # Laad de binaire data in (we zetten de limiet hoog om alle data te pakken)
@@ -50,6 +50,7 @@ for idx, agent_prefix in enumerate(agents_found):
     color = colors[idx % len(colors)]
     
     # Grafiek 1: World Model Loss per Agent
+    """
     df_wm = extract_metric(f'{agent_prefix}/World_Model_Loss')
     if df_wm is not None:
         axs[0, 0].plot(df_wm['step'], df_wm['value'], color=color, alpha=0.8, linewidth=1.5, label=agent_prefix)
@@ -58,7 +59,7 @@ for idx, agent_prefix in enumerate(agents_found):
     df_ir = extract_metric(f'{agent_prefix}/Intrinsic_Reward_Raw_Mean')
     if df_ir is not None:
         axs[0, 1].plot(df_ir['step'], df_ir['value'], color=color, alpha=0.8, linewidth=1.5, label=agent_prefix)
-        
+    """     
     # Grafiek 3: Policy Entropy per Agent
     df_ent = extract_metric(f'{agent_prefix}/Entropy')
     if df_ent is not None:
