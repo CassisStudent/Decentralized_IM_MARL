@@ -1,4 +1,7 @@
 import os
+import pyglet
+pyglet.options['headless'] = True
+
 
 import yaml
 import sys
@@ -11,6 +14,8 @@ import datetime
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
 from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
+from pymarlzooplus.learners.independent_ppo_world_learner import IndependentPPOWorldLearner
+from pymarlzooplus.learners.independent_ppo_moa_world_learner import IndependentPPOWorldLearnerMOA
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -127,7 +132,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
     agents = []
     
     for i in range(n_agents):
-        agent = IndependentPPOLearner(
+        agent = IndependentPPOWorldLearnerMOA(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
             args=args,
@@ -140,8 +145,6 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
         agents.append(agent)
     
     print(f"Modellen succesvol ingeladen vanuit {model_path}! Starten van {num_episodes}")
-    
-    
     
     # 2a. Create Buffers
     device = next(agents[0].actor.parameters()).device
@@ -183,7 +186,8 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
             
             step += 1
 
-        rl_video_recorder.save_video(episode)    
+        rl_video_recorder.save_video(episode)  
+        rl_video_recorder.reset_frames_buffer()
         print(f"Episode {episode+1} voltooid | Totale Extrinsieke Score: {episode_reward:.2f} | Stappen: {step}")
     
     env.close()
@@ -192,9 +196,5 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
 
 if __name__ == "__main__":
     # Pas dit aan naar de exacte map waar jouw .th bestanden staan
-    MODEL_PATH = "./results/models/final" 
-    evaluate_agents(MODEL_PATH, num_episodes=2)
-    #vdisplay.stop()
-    #print("Virtueel scherm netjes afgesloten.")
-    #vdisplay.stop()
-    print("Fake scherm netjes afgesloten.")
+    MODEL_PATH = "./results/models/baseline_20260707-173832/final" 
+    evaluate_agents(MODEL_PATH, num_episodes=5)

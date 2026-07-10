@@ -174,7 +174,7 @@ class IndependentPPOWorldLearnerMOA:
         
         moa_input_obs = obs[:, :-1]
         moa_input_actions = all_actions_one_hot[:, :-1]
-        moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1?
+        moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1? [batch, time, n_partners]
         
         
 
@@ -182,6 +182,7 @@ class IndependentPPOWorldLearnerMOA:
         current_rnn_states = rnn_states[:, :-1]
         current_my_actions = actions_one_hot[:, :-1]
         all_current_actions = moa_input_actions
+        
         next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
         """
@@ -199,47 +200,63 @@ class IndependentPPOWorldLearnerMOA:
         
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
-            next_action_logits, _ = self.moa(moa_input_obs, moa_input_actions)
+            next_action_logits, _ = self.moa(moa_input_obs, moa_input_actions) # [batch, time, n_partners, action_dimension]
+                        
+            # Nieuwe shape: [32, 5, 499, 2] -> [Batch, Klassen (C), Tijd (d1), Partners (d2)]
+            logits_permuted = next_action_logits.permute(0, 3, 1, 2)
             
+            moa_loss_flat = th.nn.functional.cross_entropy(
+                logits_permuted,
+                moa_target_partners.long(),
+                reduction="none"
+            )
+            """
             moa_loss_flat = th.nn.functional.cross_entropy(
                 next_action_logits.view(-1, action_dim),
                 moa_target_partners.contiguous().view(-1).long(),
                 reduction="none"
             ).view(buffer_size, max_seq_length - 1, self.args.n_agents - 1)
-            
+            """
             moa_loss = (moa_loss_flat * wm_mask_3d).sum() / wm_mask_3d.sum()
             moa_loss = moa_loss * self.args.moa_loss_weight # scaling conform paper (bijv. 10.0). #DIT MOET NOG IN  DE TEST_ARGS KOMEN TE STAAN DAN....
+            
+            
             self.moa_optimiser.zero_grad()
             moa_loss.backward()
             th.nn.utils.clip_grad_norm_(self.moa.parameters(), max_norm=0.5) #VERANDER DE MAX_NORM NOG NAAR EEN  GOED GETAL?
             self.moa_optimiser.step()
 
-            #predicted next actions for world_model;
-            with th.no_grad():
-                current_logits, _ = self.moa(moa_input_obs, moa_input_actions)
-                moa_probs = th.nn.functional.softmax(current_logits, dim=-1)
-                # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
-                moa_probs_flat = moa_probs.view(buffer_size, max_seq_length - 1, -1).detach()
-                
-            wm_combined_actions_input = th.cat([current_my_actions, moa_probs_flat], dim=-1)
+        #predicted next actions for world_model;
+        with th.no_grad():
+            current_logits, _ = self.moa(moa_input_obs, moa_input_actions)
+            moa_probs = th.nn.functional.softmax(current_logits, dim=-1)
+            # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
+            moa_probs_flat = moa_probs.view(buffer_size, max_seq_length - 1, -1).detach()
+
+        wm_combined_actions_input = th.cat([current_my_actions, moa_probs_flat], dim=-1)
+        
+        
+        # =====================================================================
+        # STAP 1B: WORLD MODEL UPDATE (before PPO Berekeningen)
+        # =====================================================================
+        for wm_epoch in range(self.args.wm_epochs):
             predictions = self.world_model(current_rnn_states, wm_combined_actions_input)
-            
             #  MSE loss per model
             wm_loss = 0.0
-            
+
             for model_pred in predictions:
                 squared_errors = (model_pred - next_obs_target) ** 2
                 mean_squared_errors = squared_errors.mean(dim=-1, keepdim=True) # Shape: [32, 499, 1]
                 wm_loss += (mean_squared_errors * wm_mask_3d).sum() / wm_mask_3d.sum()
                 #wm_loss += (squared_errors.sum(dim=-1, keepdim=True) * wm_mask).sum() / wm_mask.sum()
-                
+
             wm_loss = wm_loss / 5.0 # 5.0 is the enumber of world models we use
-            
+
             self.world_model_optimiser.zero_grad()
             wm_loss.backward()
             th.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimiser.step()
-        
+
         # =====================================================================
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
         # =====================================================================
@@ -252,17 +269,19 @@ class IndependentPPOWorldLearnerMOA:
             reward_mean = valid_rewards.mean()
             
             # Z-score normalisation
-            intrinsic_reward_norm = (intrinsic_reward - reward_mean) / reward_std
+            intrinsic_reward_norm = ((intrinsic_reward - reward_mean) / reward_std) * wm_mask
             
             full_intrinsic = th.zeros_like(rewards)
-            if t_environment > 200000:
+            if t_environment > 500000:
                 full_intrinsic[:, :-1] = intrinsic_reward_norm
         
-        total_rewards = rewards + self.args.beta * full_intrinsic
-
         if self.args.standardise_rewards:
-            self.rew_ms.update(total_rewards)
-            total_rewards = (total_rewards  - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
+            self.rew_ms.update(rewards)
+            rewards_scaled = (rewards  - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
+        else:
+            rewards_scaled = rewards
+
+        total_rewards = rewards_scaled + self.args.beta * full_intrinsic
 
         # ----------------------------
         # RETURNS (per episode)
@@ -287,16 +306,44 @@ class IndependentPPOWorldLearnerMOA:
             advantages = advantages * mask
         
         
+        chunk_size = self.args.chunk_size_rnn
         
         #print("obs.shape" + str(obs.shape))
         for k in range(self.args.epochs):            
-            new_logprobs = th.zeros_like(old_logprobs, device=device)
-            entropies = th.zeros_like(old_logprobs, device=device)
-            new_values = th.zeros_like(old_values, device=device)
+            #new_logprobs = th.zeros_like(old_logprobs, device=device)
+            #entropies = th.zeros_like(old_logprobs, device=device)
+            #new_values = th.zeros_like(old_values, device=device)
+            
+            new_logprobs_list = []
+            entropies_list = []
+            new_values_list = []
 
             #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
             #self.init_hidden_buffer(buffer_size)
             
+            local_hidden = rnn_states[:, 0, :].unsqueeze(0).to(device)
+            
+            for t in range(0, max_seq_length, chunk_size):
+                obs_chunk = obs[:, t:t+chunk_size]
+                actions_chunk = actions[:, t:t+chunk_size]
+                
+                logits_chunk, local_hidden = self.actor(obs_chunk, local_hidden.detach())
+                
+                probs_chunk = Categorical(logits=logits_chunk)
+                logprobs_chunk = probs_chunk.log_prob(actions_chunk.squeeze(-1))
+                entropy_chunk = probs_chunk.entropy()
+                
+                v_chunk = self.critic(obs_chunk).squeeze(-1)
+                
+                new_logprobs_list.append(logprobs_chunk)
+                entropies_list.append(entropy_chunk)
+                new_values_list.append(v_chunk)
+            
+            new_logprobs = th.cat(new_logprobs_list, dim=1)
+            entropies = th.cat(entropies_list, dim=1)
+            new_values = th.cat(new_values_list, dim=1)
+          
+            """
             local_hidden = self.actor.init_hidden().expand(1, buffer_size, -1).contiguous().to(device)
             
             logits, _ = self.actor(obs, local_hidden)
@@ -306,7 +353,7 @@ class IndependentPPOWorldLearnerMOA:
             
             v = self.critic(obs).squeeze(-1)
             new_values = v
-          
+            """
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
             surr1 = ratio * advantages
@@ -413,6 +460,7 @@ class IndependentPPOWorldLearnerMOA:
             # Sla ook de bèta op, handig als je later met decay gaat testen
             self.last_beta = self.args.beta
             
+            self.last_moa_loss = moa_loss
             
             
             

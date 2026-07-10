@@ -1,3 +1,6 @@
+import pyglet
+pyglet.options['headless'] = True
+
 import random
 import os
 from typing import Tuple, Any, Dict, List
@@ -8,6 +11,8 @@ from gymnasium.utils.step_api_compatibility import step_api_compatibility
 from gymnasium.wrappers import TimeLimit as GymTimeLimit
 
 from pymarlzooplus.envs.multiagentenv import MultiAgentEnv
+
+
 
 
 class TimeLimitPressurePlate(GymTimeLimit):
@@ -99,6 +104,17 @@ class _PressurePlateWrapper(MultiAgentEnv):
         # Use the TimiLimit wrapper for handling the time limit properly.
         self.episode_limit = time_limit
         self._env = TimeLimitPressurePlate(self.original_env, max_episode_steps=self.episode_limit)
+        
+        
+        from pymarlzooplus.envs.pressureplate_ai.pressureplate.rendering import Viewer
+
+        #print(self.original_env.unwrapped.__dict__)
+        # PressurePlate stores world size in original_env.unwrapped.world_size
+        world_size = self.original_env.unwrapped.grid_size
+
+        self.viewer = Viewer(world_size)
+        
+        
 
         # Define the observation space
         if hasattr(self._env.observation_space, 'spaces'):
@@ -211,6 +227,11 @@ class _PressurePlateWrapper(MultiAgentEnv):
 
     def get_n_agents(self):
         return self.n_agents
+    
+    
+    def get_rgb_frame(self):
+        # PressurePlate’s viewer.render expects the raw env object
+        return self.viewer.render(self.original_env.unwrapped, return_rgb_array=True)
 
     def render(self):
         if self.render_capable is True:

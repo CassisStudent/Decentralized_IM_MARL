@@ -96,8 +96,6 @@ class IndependentPPOLearner:
         # misschien #action.item()?
         return action, value, next_hidden_state
     
-    
-    
     def get_logprobs(self, obs, action, available_actions=None):
         logits, self.hidden_state = self.actor(obs, self.hidden_state)
         if available_actions is not None:
@@ -113,7 +111,9 @@ class IndependentPPOLearner:
     def init_hidden_buffer(self, buffer_size):
         self.hidden_state = self.actor.init_hidden().expand(buffer_size, -1).contiguous()
     
-    def update4(self, obs, actions, old_logprobs, old_values, rewards, dones):
+    def update4(self, obs, actions, old_logprobs, old_values, rewards, dones, rnn_states):
+        rnn_states = rnn_states.to(self.device)
+
         device = next(self.actor.parameters()).device
         
         obs = obs.to(self.device)
@@ -130,7 +130,7 @@ class IndependentPPOLearner:
         # ----------------------------
         mask = th.ones_like(dones, device=device)
         mask[:, 1:] = (1 - dones[:, :-1]).cumprod(dim=1)
-        print(mask)
+        #print(mask)
 
         if self.args.standardise_rewards:
             self.rew_ms.update(rewards)
@@ -153,15 +153,44 @@ class IndependentPPOLearner:
             valid = advantages[mask > 0]
             advantages = (advantages - valid.mean()) / (valid.std() + 1e-8)
             advantages = advantages * mask
+            
+        chunk_size = self.args.chunk_size_rnn
         
         for k in range(self.args.epochs):            
-            new_logprobs = th.zeros_like(old_logprobs, device=device)
-            entropies = th.zeros_like(old_logprobs, device=device)
-            new_values = th.zeros_like(old_values, device=device)
+            #new_logprobs = th.zeros_like(old_logprobs, device=device)
+            #entropies = th.zeros_like(old_logprobs, device=device)
+            #new_values = th.zeros_like(old_values, device=device)
+            
+            new_logprobs_list = []
+            entropies_list = []
+            new_values_list = []
 
             #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
             #self.init_hidden_buffer(buffer_size)
             
+            local_hidden = rnn_states[:, 0, :].unsqueeze(0).to(device)
+            
+            for t in range(0, max_seq_length, chunk_size):
+                obs_chunk = obs[:, t:t+chunk_size]
+                actions_chunk = actions[:, t:t+chunk_size]
+                
+                logits_chunk, local_hidden = self.actor(obs_chunk, local_hidden.detach())
+                
+                probs_chunk = Categorical(logits=logits_chunk)
+                logprobs_chunk = probs_chunk.log_prob(actions_chunk.squeeze(-1))
+                entropy_chunk = probs_chunk.entropy()
+                
+                v_chunk = self.critic(obs_chunk).squeeze(-1)
+                
+                new_logprobs_list.append(logprobs_chunk)
+                entropies_list.append(entropy_chunk)
+                new_values_list.append(v_chunk)
+            
+            new_logprobs = th.cat(new_logprobs_list, dim=1)
+            entropies = th.cat(entropies_list, dim=1)
+            new_values = th.cat(new_values_list, dim=1)
+          
+            """
             local_hidden = self.actor.init_hidden().expand(1, buffer_size, -1).contiguous().to(device)
             
             logits, _ = self.actor(obs, local_hidden)
@@ -171,6 +200,7 @@ class IndependentPPOLearner:
             
             v = self.critic(obs).squeeze(-1)
             new_values = v
+            """
           
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
@@ -217,7 +247,7 @@ class IndependentPPOLearner:
                     # Bereken bruikbare metrieken voor je overzicht
                     mean_ratio = ratio.mean().item()
                     approx_kl = (ratio - 1 - th.log(ratio)).mean().item() # Maatstaf voor stabiliteit
-                    
+                """    
                 print(f"[{self.device}] Epoch {k+1}/{self.args.epochs} | "
                       f"PG Loss: {pg_loss.item():.4f} | "
                       f"Actor Loss: {actor_loss.item():.4f} | "
@@ -225,7 +255,7 @@ class IndependentPPOLearner:
                       f"Entropy Loss: {entropy_loss.item():.4f} | "
                       f"Mean Ratio: {mean_ratio:.3f} | "
                       f"Approx KL: {approx_kl:.4f}")
-        
+                """
         #---- for logging-------#
         with th.no_grad():
             self.last_pg_loss = pg_loss.item()
@@ -254,7 +284,7 @@ class IndependentPPOLearner:
             
         
         # Scheidingslijn na de volledige update van deze agent
-        print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
+        #print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
     
     def update3(self, obs, actions, old_logprobs, old_values, rewards, dones):
         device = next(self.actor.parameters()).device
@@ -558,12 +588,62 @@ class IndependentPPOLearner:
             returns[t] = return_t
         
         return returns
-
+    
     def compute_nstep_returns_vectorized(self, rewards, values, mask, n_steps):
         """
         Gevectoriseerde versie van n-step returns voor 2D tensors [Batch, Tijd].
         Berekent alle omgevingen tegelijk op de GPU!
         """
+        device = next(self.actor.parameters()).device
+        B, T = rewards.shape
+        returns = th.zeros_like(rewards, device=device)
+        gamma = self.args.gamma
+
+        # Pre-computen van de discount factoren (gamma^0, gamma^1, ..., gamma^(n-1))
+        # Dit hoeven we maar één keer te doen in plaats van elke iteratie
+        gammas = th.pow(gamma, th.arange(n_steps, dtype=th.float32, device=device))
+
+        # We lopen alleen over de n_steps (bijv. 5 keer), NIET over de tijd of omgevingen!
+        for t in range(T):
+            return_t = th.zeros(B, device=device)
+            valid_mask = th.ones(B, device=device)
+            last_step = th.zeros(B, device=device)
+
+            # Lookahead loop (maximaal n_steps groot, heel snel op GPU)
+            for n_step in range(n_steps):
+                time_idx = t + n_step
+                if time_idx >= T:
+                    break
+                
+                # Update het masker: als een omgeving stopt (mask==0), stopt de optelling voor die env
+                valid_mask = valid_mask * mask[:, time_idx]
+                
+                # Voeg de discounted reward toe voor alle omgevingen tegelijk
+                return_t += valid_mask * (gammas[n_step] * rewards[:, time_idx])
+                last_step += valid_mask
+            
+            
+            bootstrap_idx = t + n_steps
+            
+            if bootstrap_idx < T:
+                bootstrap_mask = mask[:, bootstrap_idx]
+                bootstrap_value = (gamma ** n_steps) * values[:, bootstrap_idx]
+                return_t += bootstrap_mask * bootstrap_value
+
+            else:
+                bootstrap_mask = mask[:, -1]
+                bootstrap_value = (gamma ** (T - t)) * values[:, -1]
+                return_t += bootstrap_mask * bootstrap_value
+
+                
+            returns[:, t] = return_t
+
+        return returns
+    
+    """
+    def compute_nstep_returns_vectorized(self, rewards, values, mask, n_steps):
+        Gevectoriseerde versie van n-step returns voor 2D tensors [Batch, Tijd].
+        Berekent alle omgevingen tegelijk op de GPU!
         device = next(self.actor.parameters()).device
         B, T = rewards.shape
         returns = th.zeros_like(rewards, device=device)
@@ -605,8 +685,7 @@ class IndependentPPOLearner:
             returns[:, t] = return_t
 
         return returns
-
-        
+    """
 
         
 

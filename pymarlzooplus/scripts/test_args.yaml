@@ -22,10 +22,11 @@ env_args: {
 
 
 
-t_max: 7000000
+t_max: 5000000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
+chunk_size_rnn: 10
 
 
 use_cuda: True # Use gpu by default unless it isn't available
@@ -55,14 +56,14 @@ entropy_coef: 0.01 #called ent_coef: float = 0.01. It is same in cleanrl
 # I CHANGED THIS TO TRUE. CORRESPONDS probablly TO NORM_ADV IN CLEANRL
 standardise_returns: False  #"""Toggles advantages normalization""" #dit was true
 standardise_rewards: True # dit was false
-standardise_advantages: True #Staat niet in cleanrl/pymarlzooplus. Dit is nu op false gezet voor testing
+standardise_advantages: False #Staat niet in cleanrl/pymarlzooplus. Dit is nu op false gezet voor testing
 
 name: "ippo_ns"
 use_rnn: True #Beter met True, maar veel langzamer
 
 #-------------------Intrinsic motivation-----------
 wm_epochs: 4 #epochs for training world models ensemble
-beta: 0.1
+beta: 0.2
 
 #------------------MOA----------------------------
 lr_moa: 0.001

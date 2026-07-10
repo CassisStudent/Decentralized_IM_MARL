@@ -179,7 +179,6 @@ def train_ippo():
     shared_obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, dtype=torch.float32).pin_memory().share_memory_()
     shared_rewards = torch.zeros(args.buffer_size, dtype=torch.float32).pin_memory().share_memory_()
     shared_dones = torch.zeros(args.buffer_size, dtype=torch.bool).pin_memory().share_memory_()
-    
     #image_encoder = None
     encoder_cfg = None
     processes = [
@@ -267,6 +266,8 @@ def train_ippo():
             
         torch.cuda.synchronize()
         obs = shared_obs.to(device)
+        
+        obs_buffer[:, :, 0] = obs.to(device)
             
         hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
 
@@ -302,7 +303,7 @@ def train_ippo():
                 actions_buffer[:, :, step] = actions_tensor.to(device)
                 logprobs_buffer[:, :, step] = logprobs.to(device)
                 values_buffer[:, :, step] = values.to(device)
-                obs_buffer[:, :, step] = obs.to(device)
+                #obs_buffer[:, :, step] = obs.to(device)
                 
                 actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
 
@@ -335,6 +336,9 @@ def train_ippo():
             dones_buffer[:, step] = shared_dones
             terminated |= shared_dones
             
+            if step + 1 < max_episode_length:
+                obs_buffer[:, :, step + 1] = obs.to(device)
+            
             env_steps_this_run += len(active_envs)
         
             total_buffer_time += (time.perf_counter() - t_start_buffer)
@@ -345,6 +349,7 @@ def train_ippo():
             if step % 250 == 0:
                 print(step)
             t += 1
+
             
         print("\n========== TIMING RAPPORT PROFILER ==========")
         print(f"1. Model Inference Tijd:     {total_inference_time:.4f} sec (Gemiddeld: {total_inference_time/max_episode_length:.4f} per stap)")
@@ -440,6 +445,8 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Mean", agent.last_intrinsic_raw_mean, t_environment)
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Std", agent.last_intrinsic_raw_std, t_environment)
                     writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
+                    writer.add_scalar(f"Agent_{i}/MOA_Loss", agent.last_moa_loss, t_environment)
+
 
             writer.flush()
             print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
@@ -482,12 +489,15 @@ def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewar
             actions = data
             reward, terminated, env_info = env.step(actions)
             obs = env.get_obs()
-
+            
+            #my_array = np.array(obs)
+            #print(my_array.shape)
+            
             if image_encoder is not None:
                 obs = image_encoder.observation(obs[0])
             
             obs = np.asarray(obs, dtype=np.float32)
-            
+            #print(obs.shape)
             # WRITE DIRECTLY INTO SHARED MEMORY
             shared_obs[worker_id].copy_(
                 torch.from_numpy(obs)
@@ -569,7 +579,24 @@ class CloudpickleWrapper:
             
 
 if __name__ == '__main__':
-    train_ippo()
+    import multiprocessing as mp
+    import gc
+    
+    try:
+        train_ippo()
+    except Exception as e:
+        print(f"\n[CRASH DETECTED]: {e}")
+    finally:
+        print("\n[CLEANUP]: Geforceerd opruimen van VRAM en gepend shared memory...")
+        # 1. Schiet alle achtergebleven multiprocess workers en pipes hard af
+        for child in mp.active_children():
+            child.terminate()
+            child.join()
+            
+        # 2. Dwing de Python garbage collector en PyTorch om de GPU-cache leeg te gooien
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("[CLEANUP DONE]: Server is weer schoon voor de volgende run.")
 
 
 # #########################################################################################################

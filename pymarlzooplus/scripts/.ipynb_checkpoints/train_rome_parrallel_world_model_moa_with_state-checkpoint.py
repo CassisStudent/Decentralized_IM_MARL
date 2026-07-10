@@ -171,14 +171,23 @@ def train_ippo():
     n_actions = env_info["n_actions"]
     observation_dimension = env_info["obs_shape"]
     
+    state_dimension = env_info["state_shape"]
+    
+    
     args.n_agents = n_agents
     args.n_actions = n_actions
     args.num_iterations = args.t_max // args.buffer_size
     
 
     shared_obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, dtype=torch.float32).pin_memory().share_memory_()
+    shared_state = torch.zeros(args.buffer_size, state_dimension, dtype=torch.float32).pin_memory().share_memory_()
+
     shared_rewards = torch.zeros(args.buffer_size, dtype=torch.float32).pin_memory().share_memory_()
     shared_dones = torch.zeros(args.buffer_size, dtype=torch.bool).pin_memory().share_memory_()
+    
+    
+    
+    
     #image_encoder = None
     encoder_cfg = None
     processes = [
@@ -189,7 +198,7 @@ def train_ippo():
                 worker_conn,
                 CloudpickleWrapper(partial(env_fn, **env_arg)),
                 encoder_cfg,
-                shared_obs,
+                shared_state,
                 shared_rewards,
                 shared_dones
             )
@@ -222,7 +231,7 @@ def train_ippo():
         print(f"Initializing Agent {i} on device: {target_device}")
         
         learner = IndependentPPOWorldLearnerMOA(
-            obs_dimension=observation_dimension,
+            obs_dimension=state_dimension,
             act_dimension=n_actions,
             args=args,
             device=target_device
@@ -234,6 +243,8 @@ def train_ippo():
     print(device)
     
     obs_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, observation_dimension, device=device)
+    state_buffer = torch.zeros(args.buffer_size, max_episode_length, state_dimension, device=device)
+    
     rewards_buffer = torch.zeros(args.buffer_size, max_episode_length, device=device)
     dones_buffer = torch.zeros(args.buffer_size, max_episode_length, device=device)
     actions_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, dtype=torch.long, device=device)
@@ -243,6 +254,7 @@ def train_ippo():
     hidden_states_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, args.hidden_dim).pin_memory()
     
     obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, device=device)
+    state = torch.zeros(args.buffer_size, state_dimension, device=device)
 
     print("obs_buffer.shape: " + str(obs_buffer.shape))
   
@@ -266,9 +278,8 @@ def train_ippo():
             
         torch.cuda.synchronize()
         obs = shared_obs.to(device)
+        state = shared_state.to(device)
         
-        obs_buffer[:, :, 0] = obs.to(device)
-            
         hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
 
         total_inference_time = 0
@@ -289,7 +300,7 @@ def train_ippo():
             # Select an action and save in buffers
             with torch.inference_mode():
                 for i in range(n_agents):
-                    action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
+                    action, logp, _, value, next_hidden = agents[i].select_action(state, hidden_states[i])
                     hidden_states[i] = next_hidden
                     
                     actions_all.append(action.cpu())
@@ -304,6 +315,7 @@ def train_ippo():
                 logprobs_buffer[:, :, step] = logprobs.to(device)
                 values_buffer[:, :, step] = values.to(device)
                 #obs_buffer[:, :, step] = obs.to(device)
+                state_buffer[:, step] = state.to(device)
                 
                 actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
 
@@ -331,13 +343,12 @@ def train_ippo():
             t_start_buffer = time.perf_counter()
 
             #Safe information in buffers
-            obs = shared_obs.to(device, non_blocking=True)
+            #obs = shared_obs.to(device, non_blocking=True)
+            state = shared_state.to(device, non_blocking=True)
+            
             rewards_buffer[:, step] = shared_rewards
             dones_buffer[:, step] = shared_dones
             terminated |= shared_dones
-            
-            if step + 1 < max_episode_length:
-                obs_buffer[:, :, step + 1] = obs.to(device)
             
             env_steps_this_run += len(active_envs)
         
@@ -383,7 +394,7 @@ def train_ippo():
             team_actions = team_actions.permute(0, 2, 1).contiguous()
             
             agents[i].update4(
-                obs_buffer[:, i], 
+                state_buffer, 
                 actions_buffer[:, i],
                 logprobs_buffer[:, i],
                 values_buffer[:, i],
@@ -397,7 +408,8 @@ def train_ippo():
         env_steps_this_run = 0
 
         #resetting buffers
-        obs_buffer.zero_()
+        #obs_buffer.zero_()
+        state_buffer.zero_()
         actions_buffer.zero_()
         logprobs_buffer.zero_()
         values_buffer.zero_()
@@ -445,8 +457,6 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Mean", agent.last_intrinsic_raw_mean, t_environment)
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Std", agent.last_intrinsic_raw_std, t_environment)
                     writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
-                    writer.add_scalar(f"Agent_{i}/MOA_Loss", agent.last_moa_loss, t_environment)
-
 
             writer.flush()
             print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
@@ -471,7 +481,7 @@ def train_ippo():
 
 
 
-def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewards, shared_dones):
+def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_state, shared_rewards, shared_dones):
     # Make environment
     env = env_fn.x()
     
@@ -488,19 +498,23 @@ def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewar
         if cmd == "step":
             actions = data
             reward, terminated, env_info = env.step(actions)
-            obs = env.get_obs()
+            #obs = env.get_obs()
+            state = env.get_state()
             
             #my_array = np.array(obs)
             #print(my_array.shape)
             
-            if image_encoder is not None:
-                obs = image_encoder.observation(obs[0])
+            #if image_encoder is not None:
+            #    obs = image_encoder.observation(obs[0])
             
-            obs = np.asarray(obs, dtype=np.float32)
+            #obs = np.asarray(obs, dtype=np.float32)
             #print(obs.shape)
+            
+            state = np.asarray(state, dtype=np.float32)
+            
             # WRITE DIRECTLY INTO SHARED MEMORY
-            shared_obs[worker_id].copy_(
-                torch.from_numpy(obs)
+            shared_state[worker_id].copy_(
+                torch.from_numpy(state)
             )
             
             shared_rewards[worker_id] = reward
@@ -510,15 +524,17 @@ def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewar
 
         elif cmd == "reset":
             env.reset()
-            obs = env.get_obs()
+            #obs = env.get_obs()
+            state = env.get_state()
 
-            if image_encoder is not None:
-                obs = image_encoder.observation(obs)
+            #if image_encoder is not None:
+            #    obs = image_encoder.observation(obs)
             
-            obs = np.asarray(obs, dtype=np.float32)
-            
-            shared_obs[worker_id].copy_(
-                torch.from_numpy(obs)
+            #obs = np.asarray(obs, dtype=np.float32)
+            state = np.asarray(state, dtype=np.float32)
+
+            shared_state[worker_id].copy_(
+                torch.from_numpy(state)
             )
             shared_rewards[worker_id] = 0.0
             shared_dones[worker_id] = False
@@ -579,24 +595,7 @@ class CloudpickleWrapper:
             
 
 if __name__ == '__main__':
-    import multiprocessing as mp
-    import gc
-    
-    try:
-        train_ippo()
-    except Exception as e:
-        print(f"\n[CRASH DETECTED]: {e}")
-    finally:
-        print("\n[CLEANUP]: Geforceerd opruimen van VRAM en gepend shared memory...")
-        # 1. Schiet alle achtergebleven multiprocess workers en pipes hard af
-        for child in mp.active_children():
-            child.terminate()
-            child.join()
-            
-        # 2. Dwing de Python garbage collector en PyTorch om de GPU-cache leeg te gooien
-        gc.collect()
-        torch.cuda.empty_cache()
-        print("[CLEANUP DONE]: Server is weer schoon voor de volgende run.")
+    train_ippo()
 
 
 # #########################################################################################################

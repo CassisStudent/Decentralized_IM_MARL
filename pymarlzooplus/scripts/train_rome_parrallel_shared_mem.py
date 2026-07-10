@@ -10,7 +10,7 @@ import datetime
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
-from pymarlzooplus.learners.independent_ppo_moa_world_learner import IndependentPPOWorldLearnerMOA
+from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -126,7 +126,7 @@ def train_ippo():
     if torch.multiprocessing.get_start_method(allow_none=True) is None:
         torch.multiprocessing.set_start_method('spawn')
     
-    run_string = "moa_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_string = "baseline_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     #-----------Logging-------------------:
     log_dir = os.path.join("results", "tb_logs", run_string)
     writer = SummaryWriter(log_dir=log_dir)
@@ -179,6 +179,7 @@ def train_ippo():
     shared_obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, dtype=torch.float32).pin_memory().share_memory_()
     shared_rewards = torch.zeros(args.buffer_size, dtype=torch.float32).pin_memory().share_memory_()
     shared_dones = torch.zeros(args.buffer_size, dtype=torch.bool).pin_memory().share_memory_()
+    
     #image_encoder = None
     encoder_cfg = None
     processes = [
@@ -221,13 +222,21 @@ def train_ippo():
         
         print(f"Initializing Agent {i} on device: {target_device}")
         
-        learner = IndependentPPOWorldLearnerMOA(
+        learner = IndependentPPOLearner(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
             args=args,
             device=target_device
         )
         agents.append(learner)
+        
+        #if args.use_cuda:
+        #    learner.cuda_new()
+     
+    #for i in range(n_agents):
+    #    agents[i].actor = torch.compile(agents[i].actor)
+    #    agents[i].critic = torch.compile(agents[i].critic) # als je select_action ook de critic gebruikt
+    
     
     # 2a. Create Buffers
     device = next(agents[0].actor.parameters()).device
@@ -241,7 +250,7 @@ def train_ippo():
     values_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, device=device)
     
     hidden_states_buffer = torch.zeros(args.buffer_size, n_agents, max_episode_length, args.hidden_dim).pin_memory()
-    
+
     obs = torch.zeros(args.buffer_size, n_agents, observation_dimension, device=device)
 
     print("obs_buffer.shape: " + str(obs_buffer.shape))
@@ -267,9 +276,17 @@ def train_ippo():
         torch.cuda.synchronize()
         obs = shared_obs.to(device)
         
-        obs_buffer[:, :, 0] = obs.to(device)
+        # Init hidden state agent: (memory of of this episode)
+        #for agent in agents:
+        #    agent.init_hidden_buffer(args.buffer_size)
             
         hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
+        
+        #for b_index, parent_conn in enumerate(parent_conns):
+        #    data = parent_conn.recv()
+        #    obs[b_index] = torch.from_numpy(data["obs"]).to(device)
+        
+        #init_data_samples = [conn.recv() for conn in parent_conns]
 
         total_inference_time = 0
         total_env_comm_time = 0
@@ -281,16 +298,16 @@ def train_ippo():
             logp_all = []
             value_all = []
             
+            #torch.cuda.synchronize() # Zorg dat GPU leeg is voor de start
             t_start_inf = time.perf_counter()
-        
+            
             hidden_states_cpu = torch.stack([h.cpu() for h in hidden_states], dim=1)
             hidden_states_buffer[:, :, step] = hidden_states_cpu
-
-            # Select an action and save in buffers
+        
             with torch.inference_mode():
                 for i in range(n_agents):
                     action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
-                    hidden_states[i] = next_hidden
+                    hidden_states[i] = next_hidden # Update de hidden state voor de volgende stap
                     
                     actions_all.append(action.cpu())
                     logp_all.append(logp.cpu())
@@ -303,17 +320,16 @@ def train_ippo():
                 actions_buffer[:, :, step] = actions_tensor.to(device)
                 logprobs_buffer[:, :, step] = logprobs.to(device)
                 values_buffer[:, :, step] = values.to(device)
-                #obs_buffer[:, :, step] = obs.to(device)
+                obs_buffer[:, :, step] = obs.to(device)
                 
                 actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
 
-            torch.cuda.synchronize()
+            torch.cuda.synchronize()  # Wacht tot de GPU-inference écht helemaal klaar is
             total_inference_time += (time.perf_counter() - t_start_inf)
 
             active_envs = []
             t_start_env = time.perf_counter()
             
-            #step in each environment
             for idx, parent_conn in enumerate(parent_conns):
                 if not terminated[idx]:
                     parent_conn.send(("step", actions[idx]))
@@ -321,26 +337,23 @@ def train_ippo():
 
             total_env_comm_time += (time.perf_counter() - t_start_env)
             
-            #Receive all the info from the step
+            
             t_start_recv = time.perf_counter()
             for idx in active_envs:
                 parent_conns[idx].recv()
                 
             total_env_recv_time += (time.perf_counter() - t_start_recv)
-    
+            
             t_start_buffer = time.perf_counter()
 
-            #Safe information in buffers
+            # Process results sequentially once all concurrent recvs finish
             obs = shared_obs.to(device, non_blocking=True)
             rewards_buffer[:, step] = shared_rewards
             dones_buffer[:, step] = shared_dones
             terminated |= shared_dones
             
-            if step + 1 < max_episode_length:
-                obs_buffer[:, :, step + 1] = obs.to(device)
-            
             env_steps_this_run += len(active_envs)
-        
+            
             total_buffer_time += (time.perf_counter() - t_start_buffer)
 
             if terminated.all():
@@ -349,7 +362,6 @@ def train_ippo():
             if step % 250 == 0:
                 print(step)
             t += 1
-
             
         print("\n========== TIMING RAPPORT PROFILER ==========")
         print(f"1. Model Inference Tijd:     {total_inference_time:.4f} sec (Gemiddeld: {total_inference_time/max_episode_length:.4f} per stap)")
@@ -365,7 +377,8 @@ def train_ippo():
         print("=============================================\n")
     
         with torch.inference_mode():
-            # gemiddelde van 32 omgevingen
+            # rewards_buffer heeft shape [buffer_size, max_seq_length]
+            # We berekenen het gemiddelde over alle 32 parallelle omgevingen heen
             mean_episode_reward = rewards_buffer.sum(dim=1).mean().item()
             
         print(f"GEMIDDELDE EPISODIC RETURN (REWARDS): {mean_episode_reward:.2f}")
@@ -375,13 +388,9 @@ def train_ippo():
         #episode_index += 1
         t_environment += env_steps_this_run
 
-        #---------------UPDATING-----------------------
         # 4. PPO update per agent (OUTSIDE OF EPISODE LOOP)
         #if episode_index == args.buffer_size:
         for i in range(n_agents):
-            team_actions = torch.cat([actions_buffer[:, :i], actions_buffer[:, i + 1:]], dim=1)
-            team_actions = team_actions.permute(0, 2, 1).contiguous()
-            
             agents[i].update4(
                 obs_buffer[:, i], 
                 actions_buffer[:, i],
@@ -389,14 +398,11 @@ def train_ippo():
                 values_buffer[:, i],
                 rewards_buffer,
                 dones_buffer,
-                hidden_states_buffer[:, i],
-                team_actions,
-                t_environment
+                hidden_states_buffer[:, i]
             )
         #episode_index = 0
         env_steps_this_run = 0
 
-        #resetting buffers
         obs_buffer.zero_()
         actions_buffer.zero_()
         logprobs_buffer.zero_()
@@ -407,6 +413,7 @@ def train_ippo():
         
         
         # --- MODEL SAVING ---
+        # args.save_model_interval kan bijvoorbeeld 50.000 stappen zijn
         if args.save_model and (t_environment - model_save_time >= args.save_model_interval or t_environment >= args.t_max):
             model_save_time = t_environment
     
@@ -422,8 +429,8 @@ def train_ippo():
         if (t_environment - last_log_T) >= args.log_interval or t_environment >= args.t_max:
             last_log_T = t_environment
             
-            writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
             
+            writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
             
             for i in range(n_agents):
                 agent = agents[i]
@@ -440,16 +447,11 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/STD_Advantage", agent.last_std_advantage, t_environment)
                     
                     writer.add_scalar(f"Agent_{i}/Explained_Variance", agent.last_explained_var, t_environment)
-                    
-                    writer.add_scalar(f"Agent_{i}/World_Model_Loss", agent.last_wm_loss, t_environment)
-                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Mean", agent.last_intrinsic_raw_mean, t_environment)
-                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Std", agent.last_intrinsic_raw_std, t_environment)
-                    writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
-                    writer.add_scalar(f"Agent_{i}/MOA_Loss", agent.last_moa_loss, t_environment)
-
-
+            
             writer.flush()
             print(f"[LOG] Alle metrics (inclusief Explained Variance & Grad Norm) weggeschreven bij stap {t_environment}")
+    
+    
     
     
     #Final save
@@ -489,15 +491,12 @@ def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewar
             actions = data
             reward, terminated, env_info = env.step(actions)
             obs = env.get_obs()
-            
-            #my_array = np.array(obs)
-            #print(my_array.shape)
-            
+
             if image_encoder is not None:
                 obs = image_encoder.observation(obs[0])
             
             obs = np.asarray(obs, dtype=np.float32)
-            #print(obs.shape)
+            
             # WRITE DIRECTLY INTO SHARED MEMORY
             shared_obs[worker_id].copy_(
                 torch.from_numpy(obs)
@@ -579,24 +578,7 @@ class CloudpickleWrapper:
             
 
 if __name__ == '__main__':
-    import multiprocessing as mp
-    import gc
-    
-    try:
-        train_ippo()
-    except Exception as e:
-        print(f"\n[CRASH DETECTED]: {e}")
-    finally:
-        print("\n[CLEANUP]: Geforceerd opruimen van VRAM en gepend shared memory...")
-        # 1. Schiet alle achtergebleven multiprocess workers en pipes hard af
-        for child in mp.active_children():
-            child.terminate()
-            child.join()
-            
-        # 2. Dwing de Python garbage collector en PyTorch om de GPU-cache leeg te gooien
-        gc.collect()
-        torch.cuda.empty_cache()
-        print("[CLEANUP DONE]: Server is weer schoon voor de volgende run.")
+    train_ippo()
 
 
 # #########################################################################################################

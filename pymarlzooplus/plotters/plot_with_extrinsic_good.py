@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tensorboard.backend.event_processing import event_accumulator
 
-run_name = "moa_20260630-142320"
+run_name = "moa_20260710-215220"
 # 1. Zoek naar je logbestand
 log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)
@@ -39,7 +39,8 @@ ax_ir = fig.add_subplot(grid[0, 1])
 ax_ent = fig.add_subplot(grid[1, 0])
 ax_loss = fig.add_subplot(grid[1, 1])
 ax_ext = fig.add_subplot(grid[3, :]) # Grote balk onderaan voor de echte score!
-ax_last_explained_var = fig.add_subplot(grid[2, :])
+ax_last_explained_var = fig.add_subplot(grid[2, 0])
+ax_moa_loss = fig.add_subplot(grid[2,1])
 
 colors = plt.cm.tab10.colors
 
@@ -74,6 +75,10 @@ for idx, agent_prefix in enumerate(agents_found):
     df_var = extract_metric(f'{agent_prefix}/Explained_Variance')
     if df_ent is not None:
         ax_last_explained_var.plot(df_var['step'], df_var['value'], color=color, alpha=0.8, label=agent_prefix)
+        
+    df_moa = extract_metric(f'{agent_prefix}/MOA_Loss')
+    if df_moa is not None:
+        ax_moa_loss.plot(df_moa['step'], df_moa['value'], color=color, alpha=0.8, label=agent_prefix)
 
 # --- GRAFIEK 5: DE ECHTE EXTRINSIEKE REWARD (OMGEVINGSPUNTEN) ---
 # We zoeken flexibel naar de reward-tag (omdat deze vaak niet per agent maar globaal wordt opgeslagen)
@@ -89,7 +94,7 @@ if reward_tags:
 else:
     ax_ext.set_title("Echte Omgevingspunten (Geen 'return' of 'reward' tag gevonden in log file)", fontsize=12, fontweight='bold')
     print("Beschikbare tags waren:", available_tags) # Helpt je de juiste tag te vinden als de zoektocht faalt
-    
+
 
 
 # --- TITELS EN LABELS OPMAAK ---
@@ -118,8 +123,12 @@ ax_last_explained_var.set_title('expl. var', fontweight='bold')
 ax_last_explained_var.grid(True, linestyle='--', alpha=0.5)
 ax_last_explained_var.legend()
 
+ax_moa_loss.set_title('MOA LOSS', fontweight='bold')
+ax_moa_loss.grid(True, linestyle='--', alpha=0.5)
+ax_moa_loss.legend()
+
 if not os.path.exists("images/" + run_name):
     os.makedirs("images/" + run_name)
-    
+
 plt.savefig("images/" + run_name + "/marl_validation_with_extrinsic.png", dpi=300, bbox_inches='tight')
 print("\nSucces! De uitgebreide validatie-grafiek is opgeslagen als 'marl_validation_with_extrinsic.png'.")
