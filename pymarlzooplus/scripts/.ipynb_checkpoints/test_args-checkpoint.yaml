@@ -22,7 +22,7 @@ env_args: {
 
 
 
-t_max: 5000000
+t_max: 2500000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
@@ -38,6 +38,7 @@ use_cuda_cnn_modules: True # Use gpu. This is only for the CNN modules. If 'use_
 # specific for algorithm
 gamma: 0.99            #Same for both cleanRL and Pymarlzoo+
 lr: 0.00025            #"""the learning rate of the optimizer"""
+lr_critic: 0.0001
 critic_type: "decentralized_critic"
 grad_norm_clip: 10 # Reduce magnitude of gradients above this L2 norm. Cleanrl uses small 0.5 value. We allow for bigger gradients, because of multiple agent settings.
 

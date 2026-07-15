@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tensorboard.backend.event_processing import event_accumulator
 
-run_name = "moa_20260710-215220"
+run_name = "moa_critic20260715-145301"
 # 1. Zoek naar je logbestand
 log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)

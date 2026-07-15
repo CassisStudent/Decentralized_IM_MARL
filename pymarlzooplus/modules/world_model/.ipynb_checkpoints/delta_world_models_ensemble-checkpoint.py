@@ -2,12 +2,12 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-class WorldModelsEnsembleMOA(nn.Module):
-    def __init__(self, state_dim, combined_action_dim, latent_dim, hidden_dim=64, n_agents=1):
-        super(WorldModelsEnsembleMOA, self).__init__()
+class DeltaWorldModelsEnsemble(nn.Module):
+    def __init__(self, obs_dim, combined_action_dim, latent_dim, hidden_dim=64, n_agents=1):
+        super(DeltaWorldModelsEnsemble, self).__init__()
         
         # Inputs: RNN-state (state_dim) + action
-        input_dim = state_dim + combined_action_dim
+        input_dim = obs_dim + combined_action_dim
         self.latent_dim = latent_dim
         
         self.models = nn.ModuleList([
@@ -16,7 +16,7 @@ class WorldModelsEnsembleMOA(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, latent_dim)
+                nn.Linear(hidden_dim, obs_dim)
             ) for _ in range(5)
         ])
 

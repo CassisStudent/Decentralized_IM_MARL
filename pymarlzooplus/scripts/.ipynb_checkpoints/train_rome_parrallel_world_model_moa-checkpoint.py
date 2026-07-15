@@ -382,6 +382,8 @@ def train_ippo():
             team_actions = torch.cat([actions_buffer[:, :i], actions_buffer[:, i + 1:]], dim=1)
             team_actions = team_actions.permute(0, 2, 1).contiguous()
             
+            print("team_actions: " + str(team_actions.shape))
+            
             agents[i].update4(
                 obs_buffer[:, i], 
                 actions_buffer[:, i],
@@ -579,6 +581,8 @@ class CloudpickleWrapper:
             
 
 if __name__ == '__main__':
+    train_ippo()
+    """
     import multiprocessing as mp
     import gc
     
@@ -597,6 +601,6 @@ if __name__ == '__main__':
         gc.collect()
         torch.cuda.empty_cache()
         print("[CLEANUP DONE]: Server is weer schoon voor de volgende run.")
-
+    """
 
 # #########################################################################################################

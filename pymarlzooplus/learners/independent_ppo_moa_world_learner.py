@@ -23,9 +23,9 @@ class IndependentPPOWorldLearnerMOA:
         self.actor_params = list(self.actor.parameters())
         self.actor_optimiser = Adam(params=self.actor_params, lr=args.lr)
 
-        self.critic = critic_registry[args.critic_type](obs_dimension, self.args).to(self.device)
+        self.critic = critic_registry[args.critic_type](obs_dimension + (self.args.n_agents - 1) * self.args.n_actions, self.args).to(self.device)
         self.critic_params = list(self.critic.parameters())
-        self.critic_optimiser = Adam(params=self.critic_params, lr=args.lr)
+        self.critic_optimiser = Adam(params=self.critic_params, lr=args.lr_critic)
         
         self.target_critic = copy.deepcopy(self.critic).to(self.device)
 
@@ -46,7 +46,7 @@ class IndependentPPOWorldLearnerMOA:
         total_action_dim = self.args.n_actions * self.args.n_agents
         
         self.world_model = WorldModelsEnsembleMOA(
-            state_dim=args.hidden_dim,  # rnn-state
+            state_dim=obs_dimension,  # rnn-state
             combined_action_dim=total_action_dim,   # number of actions
             latent_dim=obs_dimension,   # the prediction of the next state
         ).to(self.device)
@@ -84,6 +84,38 @@ class IndependentPPOWorldLearnerMOA:
         # misschien #action.item()?
         return action, log_prob, probs.entropy(), value
     """
+    
+    def select_action2(self, obs, hidden_state, moa_hidden, partner_actions_one_hot, action=None):
+        obs = obs.to(self.device)
+        hidden_state = hidden_state.to(self.device)
+        
+        logits, next_hidden_state = self.actor(obs, hidden_state)
+        
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        log_prob = probs.log_prob(action)
+        
+        # We voegen een tijdsas toe via .unsqueeze(1) -> [Batch, 1, Features]
+        obs_time = obs.unsqueeze(1)
+        
+        my_action_one_hot = th.nn.functional.one_hot(action.long(), num_classes=self.args.n_actions).float().unsqueeze(1)
+        
+        partner_actions_cuda = partner_actions_one_hot.to(self.device).unsqueeze(1)
+        all_actions_time = th.cat([my_action_one_hot, partner_actions_cuda], dim=-1)
+        
+        with th.no_grad():
+            moa_logits_time, next_moa_hidden = self.moa(obs_time, all_actions_time, moa_hidden)
+            moa_probs_time = th.nn.functional.softmax(moa_logits_time, dim=-1)
+            # Flatten naar [Batch, N_Partners * Action_Dim]
+            moa_probs_step = moa_probs_time.view(obs.shape[0], -1)
+        
+        # 3. De Critic krijgt de verrijkte lokale context!
+        critic_input = th.cat([obs, moa_probs_step], dim=-1)
+        value = self.critic(critic_input)
+        
+        return action, log_prob, probs.entropy(), value, next_hidden_state, next_moa_hidden
+
     
     def select_action(self, obs, hidden_state, action=None, available_actions=None):
         obs = obs.to(self.device)
@@ -169,21 +201,27 @@ class IndependentPPOWorldLearnerMOA:
         #================================
         team_actions_one_hot = th.nn.functional.one_hot(team_actions.long(), num_classes=action_dim).float()
         team_actions_one_hot_flat = team_actions_one_hot.view(buffer_size, max_seq_length, (self.args.n_agents - 1) * action_dim)
-        
         all_actions_one_hot = th.cat([actions_one_hot, team_actions_one_hot_flat], dim=-1)
         
+        prev_actions_one_hot = th.zeros_like(all_actions_one_hot)
+        # Stap 0 blijft pure nullen (exact zoals 'prev_all_actions' in de runner!)
+        # Vanaf stap 1 kopiëren we de acties van t-1
+        prev_actions_one_hot[:, 1:] = all_actions_one_hot[:, :-1]
+        
         moa_input_obs = obs[:, :-1]
-        moa_input_actions = all_actions_one_hot[:, :-1]
-        moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1? [batch, time, n_partners]
+        #moa_input_actions = all_actions_one_hot[:, :-1]
+        #moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1? [batch, time, n_partners]
+        moa_input_actions = prev_actions_one_hot[:, :-1]  # Input: a_{-1}(0), a₀, a₁, ..., a_T-2  <--- DIT IS DE FIX!
+        moa_target_partners = team_actions[:, :-1]   # Target: De acties die partners NU doen op t (a₀, a₁, ..., a_T-1)
         
         
 
         # cut-off
         current_rnn_states = rnn_states[:, :-1]
         current_my_actions = actions_one_hot[:, :-1]
-        all_current_actions = moa_input_actions
+        #all_current_actions = moa_input_actions
         
-        next_obs_target = obs[:, 1:].detach()
+        #next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
         """
         print("wm_mask " + str(wm_mask.shape))
@@ -197,19 +235,55 @@ class IndependentPPOWorldLearnerMOA:
         else:
             wm_mask_3d = wm_mask
         
+        ##===============================
+        # STAP 1B; MOA UPDATE loop
+        #================================
+        
+        chunk_size_moa = 10
         
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
+            """
             next_action_logits, _ = self.moa(moa_input_obs, moa_input_actions) # [batch, time, n_partners, action_dimension]
                         
             # Nieuwe shape: [32, 5, 499, 2] -> [Batch, Klassen (C), Tijd (d1), Partners (d2)]
-            logits_permuted = next_action_logits.permute(0, 3, 1, 2)
             
+            logits_permuted = next_action_logits.permute(0, 3, 1, 2)
+            """
+            moa_hidden = (
+                th.zeros(1, buffer_size, self.moa.cell_size, device=device),
+                th.zeros(1, buffer_size, self.moa.cell_size, device=device)
+            )
+            
+            moa_loss_flat_list = []
+            
+            for t in range(0, max_seq_length - 1, chunk_size_moa):
+                obs_chunk = moa_input_obs[:, t:t+chunk_size_moa]
+                actions_chunk = moa_input_actions[:, t:t+chunk_size_moa]
+                targets_chunk = moa_target_partners[:, t:t+chunk_size_moa]
+                
+                logits_chunk, moa_hidden = self.moa(obs_chunk, actions_chunk, (moa_hidden[0].detach(), moa_hidden[1].detach()))
+                
+                # Permute conform de PyTorch Cross-Entropy wetten
+                logits_permuted = logits_chunk.permute(0, 3, 1, 2)
+                
+                loss_chunk = th.nn.functional.cross_entropy(
+                    logits_permuted,
+                    targets_chunk.long(),
+                    reduction="none"
+                )
+                moa_loss_flat_list.append(loss_chunk)
+            
+            moa_loss_flat = th.cat(moa_loss_flat_list, dim=1)
+            
+            """
             moa_loss_flat = th.nn.functional.cross_entropy(
                 logits_permuted,
                 moa_target_partners.long(),
                 reduction="none"
             )
+            
+            """
             """
             moa_loss_flat = th.nn.functional.cross_entropy(
                 next_action_logits.view(-1, action_dim),
@@ -232,15 +306,22 @@ class IndependentPPOWorldLearnerMOA:
             moa_probs = th.nn.functional.softmax(current_logits, dim=-1)
             # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
             moa_probs_flat = moa_probs.view(buffer_size, max_seq_length - 1, -1).detach()
+            
+            last_step_prob = moa_probs_flat[:, -1:, :] # Pak de allerlaatste stap [Batch, 1, Features]
+            # Concateneer over de tijdsas (dim=1) -> Nieuwe shape is perfect [Batch, max_seq_length, Features]
+            moa_probs_flat_padded = th.cat([moa_probs_flat, last_step_prob], dim=1) 
+
+            
 
         wm_combined_actions_input = th.cat([current_my_actions, moa_probs_flat], dim=-1)
         
         
+        next_obs_target = (obs[:, 1:] - obs[:, :-1]).detach()
         # =====================================================================
-        # STAP 1B: WORLD MODEL UPDATE (before PPO Berekeningen)
+        # STAP 1c: WORLD MODEL UPDATE (before PPO Berekeningen)
         # =====================================================================
         for wm_epoch in range(self.args.wm_epochs):
-            predictions = self.world_model(current_rnn_states, wm_combined_actions_input)
+            predictions = self.world_model(moa_input_obs, wm_combined_actions_input)
             #  MSE loss per model
             wm_loss = 0.0
 
@@ -256,12 +337,18 @@ class IndependentPPOWorldLearnerMOA:
             wm_loss.backward()
             th.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimiser.step()
+            """
+            if wm_epoch == 0 or wm_epoch == self.args.wm_epochs - 1:
+                with th.no_grad():
+                    print(str(wm_epoch))
+                    print("wm_loss: " + str(wm_loss))
+            """   
 
         # =====================================================================
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
         # =====================================================================
         with th.no_grad():
-            intrinsic_reward = self.world_model.get_intrinsic_reward(current_rnn_states, wm_combined_actions_input)
+            intrinsic_reward = self.world_model.get_intrinsic_reward(moa_input_obs, wm_combined_actions_input)
             
             # Normalisatie
             valid_rewards = intrinsic_reward[wm_mask.bool()]
@@ -272,7 +359,7 @@ class IndependentPPOWorldLearnerMOA:
             intrinsic_reward_norm = ((intrinsic_reward - reward_mean) / reward_std) * wm_mask
             
             full_intrinsic = th.zeros_like(rewards)
-            if t_environment > 500000:
+            if t_environment > 1000000:
                 full_intrinsic[:, :-1] = intrinsic_reward_norm
         
         if self.args.standardise_rewards:
@@ -333,7 +420,11 @@ class IndependentPPOWorldLearnerMOA:
                 logprobs_chunk = probs_chunk.log_prob(actions_chunk.squeeze(-1))
                 entropy_chunk = probs_chunk.entropy()
                 
-                v_chunk = self.critic(obs_chunk).squeeze(-1)
+                moa_probs_chunk = moa_probs_flat_padded[:, t:t+chunk_size]
+                critic_input_chunk = th.cat([obs_chunk, moa_probs_chunk], dim=-1)
+                v_chunk = self.critic(critic_input_chunk).squeeze(-1)
+                
+                #v_chunk = self.critic(obs_chunk).squeeze(-1)
                 
                 new_logprobs_list.append(logprobs_chunk)
                 entropies_list.append(entropy_chunk)

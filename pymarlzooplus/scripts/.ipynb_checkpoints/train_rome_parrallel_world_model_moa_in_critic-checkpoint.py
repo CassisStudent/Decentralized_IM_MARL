@@ -126,7 +126,7 @@ def train_ippo():
     if torch.multiprocessing.get_start_method(allow_none=True) is None:
         torch.multiprocessing.set_start_method('spawn')
     
-    run_string = "moa_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_string = "moa_critic" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     #-----------Logging-------------------:
     log_dir = os.path.join("results", "tb_logs", run_string)
     writer = SummaryWriter(log_dir=log_dir)
@@ -265,11 +265,18 @@ def train_ippo():
             conn.recv()
             
         torch.cuda.synchronize()
-        obs = shared_obs.to(device)
         
+        obs = shared_obs.to(device)
         obs_buffer[:, :, 0] = obs.to(device)
             
         hidden_states = [agent.actor.init_hidden().expand(args.buffer_size, -1).contiguous().to(agent.device) for agent in agents]
+        moa_hidden_states = [
+            (torch.zeros(1, args.buffer_size, agents[i].moa.cell_size, device=agents[i].device),
+             torch.zeros(1, args.buffer_size, agents[i].moa.cell_size, device=agents[i].device))
+            for i in range(n_agents)
+        ]
+        
+        prev_all_actions = torch.zeros(args.buffer_size, n_agents, n_actions, device=device)
 
         total_inference_time = 0
         total_env_comm_time = 0
@@ -289,9 +296,16 @@ def train_ippo():
             # Select an action and save in buffers
             with torch.inference_mode():
                 for i in range(n_agents):
-                    action, logp, _, value, next_hidden = agents[i].select_action(obs[:, i], hidden_states[i])
-                    hidden_states[i] = next_hidden
+                    prev_team_actions =  torch.cat([prev_all_actions[:, :i], prev_all_actions[:, i + 1:]], dim=1)
                     
+                    prev_team_actions_flat = prev_team_actions.reshape(args.buffer_size, -1)
+                    
+                    action, logp, _, value, next_hidden, moa_next_hidden = agents[i].select_action2(
+                        obs[:, i], hidden_states[i], moa_hidden_states[i], prev_team_actions_flat)
+                    
+                    hidden_states[i] = next_hidden
+                    moa_hidden_states[i] = moa_next_hidden
+                                        
                     actions_all.append(action.cpu())
                     logp_all.append(logp.cpu())
                     value_all.append(value.cpu())
@@ -299,6 +313,8 @@ def train_ippo():
                 actions_tensor = torch.stack(actions_all, dim=1)
                 logprobs = torch.stack(logp_all, dim=1)
                 values = torch.stack(value_all, dim=1).squeeze(-1)
+                
+                prev_all_actions = torch.nn.functional.one_hot(actions_tensor.to(device).long(), num_classes=n_actions).float()
                 
                 actions_buffer[:, :, step] = actions_tensor.to(device)
                 logprobs_buffer[:, :, step] = logprobs.to(device)
@@ -381,8 +397,6 @@ def train_ippo():
         for i in range(n_agents):
             team_actions = torch.cat([actions_buffer[:, :i], actions_buffer[:, i + 1:]], dim=1)
             team_actions = team_actions.permute(0, 2, 1).contiguous()
-            
-            print("team_actions: " + str(team_actions.shape))
             
             agents[i].update4(
                 obs_buffer[:, i], 
