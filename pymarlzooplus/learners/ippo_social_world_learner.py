@@ -11,13 +11,13 @@ from pymarlzooplus.components.action_selectors import REGISTRY as action_registr
 
 from pymarlzooplus.components.standarize_stream import RunningMeanStd
 from pymarlzooplus.modules.world_model.world_models_ensemble_moa import WorldModelsEnsembleMOA
-from pymarlzooplus.modules.world_model.delta_world_models_ensemble import DeltaWorldModelsEnsemble
+#from pymarlzooplus.modules.world_model.delta_world_models_ensemble import DeltaWorldModelsEnsemble
 
 from pymarlzooplus.modules.world_model.moa import MOA_LSTM
 
 
-class IndependentPPOWorldLearnerMOA:
-    def __init__(self, obs_dimension, act_dimension, args, device="cuda:0"):#, policy, critic, args):
+class IPPOSocialWorldLearner:
+    def __init__(self, obs_dimension, act_dimension, args, device="cpu"):#, policy, critic, args):
         self.args = args
         self.device = device if args.use_cuda else "cpu"
                 
@@ -41,8 +41,12 @@ class IndependentPPOWorldLearnerMOA:
             self.ret_ms = RunningMeanStd(shape=(1, ), device=self.device) # changed the shape from self.n_agents to 1. IMPORTANT TO KEEP IN MIND
         if self.args.standardise_rewards:
             self.rew_ms = RunningMeanStd(shape=(1,), device=self.device)
-        if self.args.standardise_intrinsic:
+            
+        if self.args.standardise_intrinsic_expl:
             self.int_ms = RunningMeanStd(shape=(1,), device=self.device)
+        
+        if self.args.standardise_intrinsic_infl:
+            self.influence_ms = RunningMeanStd(shape=(1,), device=self.device)
         
         #We don't need it
         #self.action_selector = action_REGISTRY[args.action_selector](args)
@@ -174,7 +178,8 @@ class IndependentPPOWorldLearnerMOA:
     
     def update4(self, obs, actions, old_logprobs, old_values, rewards, dones, rnn_states, team_actions, t_environment):
         rnn_states = rnn_states.to(self.device)
-        
+        chunk_size = self.args.chunk_size_rnn
+
         device = next(self.actor.parameters()).device
         
         obs = obs.to(self.device)
@@ -286,9 +291,9 @@ class IndependentPPOWorldLearnerMOA:
         #predicted next actions for world_model;
         with th.no_grad():
             current_logits, _ = self.moa(moa_input_obs, moa_input_actions)
-            moa_probs = th.nn.functional.softmax(current_logits, dim=-1)
+            predicted_probs = th.nn.functional.softmax(current_logits, dim=-1)
             # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
-            moa_probs_flat = moa_probs.view(buffer_size, max_seq_length - 1, -1).detach()
+            moa_probs_flat = predicted_probs.view(buffer_size, max_seq_length - 1, -1).detach()
             
             last_step_prob = moa_probs_flat[:, -1:, :] # Pak de allerlaatste stap [Batch, 1, Features]
             # Concateneer over de tijdsas (dim=1) -> Nieuwe shape is perfect [Batch, max_seq_length, Features]
@@ -326,8 +331,26 @@ class IndependentPPOWorldLearnerMOA:
                     print(str(wm_epoch))
                     print("wm_loss: " + str(wm_loss))
             """   
-
-           
+        
+        # =====================================================================
+        # STAP 1D: PREDICTED PROBS VAN DE WERKELIJKE TRAJECTORIE (P_predicted)
+        # =====================================================================
+        with th.no_grad():
+            #predicted_probs hebben we al
+            
+            #[32, 499, 5]
+            my_policy_probs = self.get_actor_action_probs(moa_input_obs, rnn_states, max_seq_length)
+            #[Batch, 5 (Jouw mogelijke acties), Tijd, N_Partners, Action_Dim]
+            counterfactual_probs = self.moa.get_counterfactual_probs(moa_input_obs, moa_input_actions, self.args.n_actions, self.device)
+            
+            marginal_probs = self.get_marginal_probs(my_policy_probs, counterfactual_probs)
+            predicted_probs_stabilised = predicted_probs / (th.sum(predicted_probs, dim=-1, keepdim=True) + 1e-10)
+            
+            kl_divergence = self.kl_div_pytorch(predicted_probs_stabilised, marginal_probs)
+            
+            full_influence = th.zeros_like(rewards)
+            full_influence[:, :-1] = self.kl_to_intrinsic_reward(kl_divergence, wm_mask)
+        
         # =====================================================================
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
         # =====================================================================
@@ -344,39 +367,25 @@ class IndependentPPOWorldLearnerMOA:
             )
             
             intrinsic_reward_norm = intrinsic_reward_norm * wm_mask
-
-            #reward_std = valid_rewards.std() + 1e-8
-            #reward_mean = valid_rewards.mean()
-            
-            # Z-score normalisation
-            #intrinsic_reward_norm = ((intrinsic_reward - reward_mean) / reward_std) * wm_mask
             
             full_intrinsic = th.zeros_like(rewards)
-            if t_environment > 500000:
-                full_intrinsic[:, :-1] = intrinsic_reward_norm
+            #if t_environment > 500000:
+            full_intrinsic[:, :-1] = intrinsic_reward_norm
         
         if self.args.standardise_rewards:
             self.rew_ms.update(rewards)
             rewards_scaled = (rewards  - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
         else:
             rewards_scaled = rewards
-            
         
-        if t_environment < 200000:
-            current_alpha = 0.0
-            current_beta = 0.0
-        elif t_environment < 4000000:
-            # Bereken het percentage van het curriculum (loopt van 0.0 naar 1.0)
-            progress = (t_environment - 200000) / (4000000 - 200000)
-            current_alpha = progress * self.args.alpha # Faseert rustig in
-            current_beta = progress * self.args.beta   # Faseert rustig in
-        else:
-            # Na 4 miljoen stappen staan de intrinsieke motoren op volle kracht
-            current_alpha = self.args.alpha
-            current_beta = self.args.beta
-        
+        #-------------------------------
+        # STAP 1H: LINEAIRE CURRICULUM DIMMER (Theoretische Stabilisator)
+        #-------------------------------
+        current_alpha, current_beta = self.dim_curriculum(t_environment)
 
-        total_rewards = rewards_scaled + self.args.beta * full_intrinsic
+        
+        
+        total_rewards = rewards_scaled + current_alpha * full_intrinsic + current_beta * full_influence
         
         # ----------------------------
         # RETURNS (per episode)
@@ -387,11 +396,7 @@ class IndependentPPOWorldLearnerMOA:
             mask,
             self.args.q_nstep
         )
-        """
-        print("rewards mean per step:", rewards.mean())
-        print("rewards sum per episode:", rewards.sum(dim=1).mean())
-        print("target_returns mean:", target_returns.mean())
-        """
+
         advantages = (target_returns - old_values).detach()
         advantages = advantages * mask
 
@@ -401,20 +406,10 @@ class IndependentPPOWorldLearnerMOA:
             advantages = advantages * mask
         
         
-        chunk_size = self.args.chunk_size_rnn
-        
-        #print("obs.shape" + str(obs.shape))
-        for k in range(self.args.epochs):            
-            #new_logprobs = th.zeros_like(old_logprobs, device=device)
-            #entropies = th.zeros_like(old_logprobs, device=device)
-            #new_values = th.zeros_like(old_values, device=device)
-            
+        for k in range(self.args.epochs):
             new_logprobs_list = []
             entropies_list = []
             new_values_list = []
-
-            #Deze obs[step] is van 1 agent een t. laat dat duidelijk zijn.
-            #self.init_hidden_buffer(buffer_size)
             
             local_hidden = rnn_states[:, 0, :].unsqueeze(0).to(device)
             
@@ -427,10 +422,7 @@ class IndependentPPOWorldLearnerMOA:
                 probs_chunk = Categorical(logits=logits_chunk)
                 logprobs_chunk = probs_chunk.log_prob(actions_chunk.squeeze(-1))
                 entropy_chunk = probs_chunk.entropy()
-                
-                #moa_probs_chunk = moa_probs_flat_padded[:, t:t+chunk_size]
-                #critic_input_chunk = th.cat([obs_chunk, moa_probs_chunk], dim=-1)
-                #v_chunk = self.critic(critic_input_chunk).squeeze(-1)
+            
                 
                 v_chunk = self.critic(obs_chunk).squeeze(-1)
                 
@@ -441,18 +433,7 @@ class IndependentPPOWorldLearnerMOA:
             new_logprobs = th.cat(new_logprobs_list, dim=1)
             entropies = th.cat(entropies_list, dim=1)
             new_values = th.cat(new_values_list, dim=1)
-          
-            """
-            local_hidden = self.actor.init_hidden().expand(1, buffer_size, -1).contiguous().to(device)
-            
-            logits, _ = self.actor(obs, local_hidden)
-            probs = Categorical(logits=logits)
-            new_logprobs = probs.log_prob(actions.squeeze(-1))
-            entropies = probs.entropy()
-            
-            v = self.critic(obs).squeeze(-1)
-            new_values = v
-            """
+
             #actor loss
             ratio = th.exp(new_logprobs - old_logprobs)
             surr1 = ratio * advantages
@@ -474,17 +455,12 @@ class IndependentPPOWorldLearnerMOA:
             # Optimise agents
             self.actor_optimiser.zero_grad()
             actor_loss.backward()
-            """
-            print("New values", new_values.mean(), new_values.std())
-            print("target returns", target_returns.mean(), target_returns.std())
-            """
             grad_norm_actor = th.nn.utils.clip_grad_norm_(self.actor_params, self.args.grad_norm_clip)
             self.actor_optimiser.step()
             
             #optimise critic
             self.critic_optimiser.zero_grad()
             critic_loss.backward()
-            
             th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
             self.critic_optimiser.step()
 
@@ -557,7 +533,8 @@ class IndependentPPOWorldLearnerMOA:
             self.last_intrinsic_raw_std = raw_intrinsic_std
             
             # Sla ook de bèta op, handig als je later met decay gaat testen
-            self.last_beta = self.args.beta
+            self.last_alpha = current_alpha
+            self.last_beta = current_beta
             
             self.last_moa_loss = moa_loss
             
@@ -571,11 +548,97 @@ class IndependentPPOWorldLearnerMOA:
             self.last_total_rewards_mean = total_rewards.mean().item()
             self.last_total_rewards_std = total_rewards.std().item()
             
+            self.last_full_influence = full_influence.mean().item()
             
             
         
         # Scheidingslijn na de volledige update van deze agent
         #print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
+    
+    def dim_curriculum(self, t_environment):
+        if t_environment < 200000:
+            current_alpha = 0.0
+            current_beta = 0.0
+        elif t_environment < 4000000:
+            # Bereken het percentage van het curriculum (loopt van 0.0 naar 1.0)
+            progress = (t_environment - 200000) / (4000000 - 200000)
+            current_alpha = progress * self.args.alpha # Faseert rustig in
+            current_beta = progress * self.args.beta   # Faseert rustig in
+        else:
+            # Na 4 miljoen stappen staan de intrinsieke motoren op volle kracht
+            current_alpha = self.args.alpha
+            current_beta = self.args.beta
+        
+        current_alpha = self.args.alpha
+        return current_alpha, current_beta
+    
+    def kl_to_intrinsic_reward(self, kl_divergence, wm_mask):
+        kl_filtered = th.where(kl_divergence > 0.05, kl_divergence, th.zeros_like(kl_divergence))
+            
+        influence_reward = kl_filtered.sum(dim=-1)
+        #influence_reward_norm = influence_reward * wm_mask
+        valid_influence_elements = influence_reward[wm_mask.bool()].unsqueeze(-1)
+
+        if len(valid_influence_elements) > 0:
+            self.influence_ms.update(valid_influence_elements)
+        
+        current_inf_var = self.influence_ms.var.squeeze()
+
+
+        influence_reward_norm = (
+            influence_reward
+            / th.sqrt(current_inf_var + 1e-8)
+        ) * wm_mask
+        
+        return influence_reward_norm
+
+    
+    def get_actor_action_probs(self, moa_input_obs, rnn_states, max_seq_length):
+        chunk_size = self.args.chunk_size_rnn
+        
+        new_probs_list = []
+
+        local_hidden = rnn_states[:, 0, :].unsqueeze(0).to(self.device)
+
+        for t in range(0, max_seq_length - 1, chunk_size):
+            obs_chunk = moa_input_obs[:, t:t+chunk_size]
+
+            logits_chunk, local_hidden = self.actor(obs_chunk, local_hidden.detach())
+            probs_chunk = th.nn.functional.softmax(logits_chunk, dim=-1)
+
+            new_probs_list.append(probs_chunk)
+
+        my_policy_probs = th.cat(new_probs_list, dim=1)
+        return my_policy_probs
+    
+    def get_marginal_probs(self, my_policy_probs, counterfactual_probs):
+        # Breng jouw actiekansen naar de juiste shape voor broadcasting: [Batch, 5, Tijd-1, 1, 1]
+        my_probs_reshaped = my_policy_probs.permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+
+        # Vermenigvuldig jouw kans per actie met de bijbehorende counterfactual partner-reactie
+        weighted_counterfactuals = my_probs_reshaped * counterfactual_probs
+
+        # Sommeer over jouw 5 mogelijke acties (index 1) om jezelf weg te marginaliseren (P_marginal)
+        # Shape na sum: [Batch, Tijd-1, N_Partners, Action_Dim]
+        marginal_probs = th.sum(weighted_counterfactuals, dim=1)
+
+        # Numerieke stabilisatie conform de officiële paper
+        marginal_probs = marginal_probs / (th.sum(marginal_probs, dim=-1, keepdim=True) + 1e-10)
+        return marginal_probs
+
+    @staticmethod
+    def kl_div_pytorch(p, q):
+        """
+        Pure, stabiele PyTorch implementatie van de KL-divergentie: sum( P * log(P / Q) )
+        Vervangt de gecrashte TensorFlow code volledig!
+        """
+        # Formule conform paper: p * log(p / q)
+        kl = p * th.log((p + 1e-10) / (q + 1e-10))
+        kl_sum = th.sum(kl, dim=-1) # Sommeer over de actie-dimensie
+        
+        # Vervang NaNs of Infs direct door pure nullen (Numerieke veiligheid)
+        kl_clean = th.where(th.isfinite(kl_sum), kl_sum, th.zeros_like(kl_sum))
+        return kl_clean
     
             
     def compute_nstep_returns(self, rewards, values, mask, n_steps):

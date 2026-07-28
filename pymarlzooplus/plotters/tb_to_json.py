@@ -3,7 +3,7 @@ import glob
 import json
 from tensorboard.backend.event_processing import event_accumulator
 
-run_name = "moa_20260710-215220"
+run_name = "biem_20260721-162343"
 # 1. Zoek naar je logbestand
 log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)

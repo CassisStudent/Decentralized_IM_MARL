@@ -11,6 +11,8 @@ from pymarlzooplus.components.action_selectors import REGISTRY as action_registr
 
 from pymarlzooplus.components.standarize_stream import RunningMeanStd
 from pymarlzooplus.modules.world_model.world_models_ensemble_moa import WorldModelsEnsembleMOA
+from pymarlzooplus.modules.world_model.delta_world_models_ensemble import DeltaWorldModelsEnsemble
+
 from pymarlzooplus.modules.world_model.moa import MOA_LSTM
 
 
@@ -23,7 +25,8 @@ class IndependentPPOWorldLearnerMOA:
         self.actor_params = list(self.actor.parameters())
         self.actor_optimiser = Adam(params=self.actor_params, lr=args.lr)
 
-        self.critic = critic_registry[args.critic_type](obs_dimension + (self.args.n_agents - 1) * self.args.n_actions, self.args).to(self.device)
+        #self.critic = critic_registry[args.critic_type](obs_dimension + (self.args.n_agents - 1) * self.args.n_actions, self.args).to(self.device)
+        self.critic = critic_registry[args.critic_type](obs_dimension, self.args).to(self.device)
         self.critic_params = list(self.critic.parameters())
         self.critic_optimiser = Adam(params=self.critic_params, lr=args.lr_critic)
         
@@ -38,6 +41,8 @@ class IndependentPPOWorldLearnerMOA:
             self.ret_ms = RunningMeanStd(shape=(1, ), device=self.device) # changed the shape from self.n_agents to 1. IMPORTANT TO KEEP IN MIND
         if self.args.standardise_rewards:
             self.rew_ms = RunningMeanStd(shape=(1,), device=self.device)
+        if self.args.standardise_intrinsic:
+            self.int_ms = RunningMeanStd(shape=(1,), device=self.device)
         
         #We don't need it
         #self.action_selector = action_REGISTRY[args.action_selector](args)
@@ -46,7 +51,7 @@ class IndependentPPOWorldLearnerMOA:
         total_action_dim = self.args.n_actions * self.args.n_agents
         
         self.world_model = WorldModelsEnsembleMOA(
-            state_dim=obs_dimension,  # rnn-state
+            state_dim=obs_dimension,  # obs
             combined_action_dim=total_action_dim,   # number of actions
             latent_dim=obs_dimension,   # the prediction of the next state
         ).to(self.device)
@@ -243,13 +248,6 @@ class IndependentPPOWorldLearnerMOA:
         
         # training world model ensemble
         for wm_epoch in range(self.args.wm_epochs):
-            """
-            next_action_logits, _ = self.moa(moa_input_obs, moa_input_actions) # [batch, time, n_partners, action_dimension]
-                        
-            # Nieuwe shape: [32, 5, 499, 2] -> [Batch, Klassen (C), Tijd (d1), Partners (d2)]
-            
-            logits_permuted = next_action_logits.permute(0, 3, 1, 2)
-            """
             moa_hidden = (
                 th.zeros(1, buffer_size, self.moa.cell_size, device=device),
                 th.zeros(1, buffer_size, self.moa.cell_size, device=device)
@@ -275,22 +273,7 @@ class IndependentPPOWorldLearnerMOA:
                 moa_loss_flat_list.append(loss_chunk)
             
             moa_loss_flat = th.cat(moa_loss_flat_list, dim=1)
-            
-            """
-            moa_loss_flat = th.nn.functional.cross_entropy(
-                logits_permuted,
-                moa_target_partners.long(),
-                reduction="none"
-            )
-            
-            """
-            """
-            moa_loss_flat = th.nn.functional.cross_entropy(
-                next_action_logits.view(-1, action_dim),
-                moa_target_partners.contiguous().view(-1).long(),
-                reduction="none"
-            ).view(buffer_size, max_seq_length - 1, self.args.n_agents - 1)
-            """
+
             moa_loss = (moa_loss_flat * wm_mask_3d).sum() / wm_mask_3d.sum()
             moa_loss = moa_loss * self.args.moa_loss_weight # scaling conform paper (bijv. 10.0). #DIT MOET NOG IN  DE TEST_ARGS KOMEN TE STAAN DAN....
             
@@ -344,6 +327,7 @@ class IndependentPPOWorldLearnerMOA:
                     print("wm_loss: " + str(wm_loss))
             """   
 
+           
         # =====================================================================
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
         # =====================================================================
@@ -351,15 +335,24 @@ class IndependentPPOWorldLearnerMOA:
             intrinsic_reward = self.world_model.get_intrinsic_reward(moa_input_obs, wm_combined_actions_input)
             
             # Normalisatie
-            valid_rewards = intrinsic_reward[wm_mask.bool()]
-            reward_std = valid_rewards.std() + 1e-8
-            reward_mean = valid_rewards.mean()
+            valid_rewards = intrinsic_reward[wm_mask.bool()].unsqueeze(-1)
+            self.int_ms.update(valid_rewards)
+
+            intrinsic_reward_norm = (
+                (intrinsic_reward - self.int_ms.mean)
+                / th.sqrt(self.int_ms.var + 1e-8)
+            )
+            
+            intrinsic_reward_norm = intrinsic_reward_norm * wm_mask
+
+            #reward_std = valid_rewards.std() + 1e-8
+            #reward_mean = valid_rewards.mean()
             
             # Z-score normalisation
-            intrinsic_reward_norm = ((intrinsic_reward - reward_mean) / reward_std) * wm_mask
+            #intrinsic_reward_norm = ((intrinsic_reward - reward_mean) / reward_std) * wm_mask
             
             full_intrinsic = th.zeros_like(rewards)
-            if t_environment > 1000000:
+            if t_environment > 500000:
                 full_intrinsic[:, :-1] = intrinsic_reward_norm
         
         if self.args.standardise_rewards:
@@ -367,9 +360,24 @@ class IndependentPPOWorldLearnerMOA:
             rewards_scaled = (rewards  - self.rew_ms.mean) / th.sqrt(self.rew_ms.var)
         else:
             rewards_scaled = rewards
+            
+        
+        if t_environment < 200000:
+            current_alpha = 0.0
+            current_beta = 0.0
+        elif t_environment < 4000000:
+            # Bereken het percentage van het curriculum (loopt van 0.0 naar 1.0)
+            progress = (t_environment - 200000) / (4000000 - 200000)
+            current_alpha = progress * self.args.alpha # Faseert rustig in
+            current_beta = progress * self.args.beta   # Faseert rustig in
+        else:
+            # Na 4 miljoen stappen staan de intrinsieke motoren op volle kracht
+            current_alpha = self.args.alpha
+            current_beta = self.args.beta
+        
 
         total_rewards = rewards_scaled + self.args.beta * full_intrinsic
-
+        
         # ----------------------------
         # RETURNS (per episode)
         # ----------------------------
@@ -420,11 +428,11 @@ class IndependentPPOWorldLearnerMOA:
                 logprobs_chunk = probs_chunk.log_prob(actions_chunk.squeeze(-1))
                 entropy_chunk = probs_chunk.entropy()
                 
-                moa_probs_chunk = moa_probs_flat_padded[:, t:t+chunk_size]
-                critic_input_chunk = th.cat([obs_chunk, moa_probs_chunk], dim=-1)
-                v_chunk = self.critic(critic_input_chunk).squeeze(-1)
+                #moa_probs_chunk = moa_probs_flat_padded[:, t:t+chunk_size]
+                #critic_input_chunk = th.cat([obs_chunk, moa_probs_chunk], dim=-1)
+                #v_chunk = self.critic(critic_input_chunk).squeeze(-1)
                 
-                #v_chunk = self.critic(obs_chunk).squeeze(-1)
+                v_chunk = self.critic(obs_chunk).squeeze(-1)
                 
                 new_logprobs_list.append(logprobs_chunk)
                 entropies_list.append(entropy_chunk)
@@ -552,6 +560,16 @@ class IndependentPPOWorldLearnerMOA:
             self.last_beta = self.args.beta
             
             self.last_moa_loss = moa_loss
+            
+            ## WORLD MODEL
+            self.last_int_ms_mean = self.int_ms.mean.item()
+            self.last_int_ms_std = th.sqrt(self.int_ms.var).item()
+            
+            self.last_normalised_intrinsic_mean = intrinsic_reward_norm[wm_mask.bool()].mean().item()
+            self.last_normalised_intrinsic_std = intrinsic_reward_norm[wm_mask.bool()].std().item()
+
+            self.last_total_rewards_mean = total_rewards.mean().item()
+            self.last_total_rewards_std = total_rewards.std().item()
             
             
             

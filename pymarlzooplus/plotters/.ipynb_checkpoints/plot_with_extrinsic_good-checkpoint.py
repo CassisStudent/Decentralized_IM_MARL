@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tensorboard.backend.event_processing import event_accumulator
 
-run_name = "moa_critic20260715-145301"
+run_name = "baseline_10mil_20260727-225858"
 # 1. Zoek naar je logbestand
 log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)
@@ -32,7 +32,7 @@ def extract_metric(tag_name):
 
 # 2. Maak een lay-out: 2 rijen van 2 voor agent-specifieke zaken, en 1 grote rij onderop voor de Extrinsieke Return
 fig = plt.figure(figsize=(14, 14))
-grid = plt.GridSpec(4, 2, hspace=0.3, wspace=0.2)
+grid = plt.GridSpec(5, 2, hspace=0.3, wspace=0.2)
 
 ax_wm = fig.add_subplot(grid[0, 0])
 ax_ir = fig.add_subplot(grid[0, 1])
@@ -40,7 +40,8 @@ ax_ent = fig.add_subplot(grid[1, 0])
 ax_loss = fig.add_subplot(grid[1, 1])
 ax_ext = fig.add_subplot(grid[3, :]) # Grote balk onderaan voor de echte score!
 ax_last_explained_var = fig.add_subplot(grid[2, 0])
-ax_moa_loss = fig.add_subplot(grid[2,1])
+ax_intrinsic_stats = fig.add_subplot(grid[2, 1])
+ax_moa_loss = fig.add_subplot(grid[4, :])
 
 colors = plt.cm.tab10.colors
 
@@ -73,12 +74,55 @@ for idx, agent_prefix in enumerate(agents_found):
     
     #explained var
     df_var = extract_metric(f'{agent_prefix}/Explained_Variance')
-    if df_ent is not None:
+    if df_var is not None:
         ax_last_explained_var.plot(df_var['step'], df_var['value'], color=color, alpha=0.8, label=agent_prefix)
         
     df_moa = extract_metric(f'{agent_prefix}/MOA_Loss')
     if df_moa is not None:
         ax_moa_loss.plot(df_moa['step'], df_moa['value'], color=color, alpha=0.8, label=agent_prefix)
+        
+    """
+    df_raw_mean = extract_metric(f'{agent_prefix}/Intrinsic_Reward_Raw_Mean')
+    #df_raw_std = extract_metric(f'{agent_prefix}/Intrinsic_Reward_Raw_Std')
+    df_run_mean = extract_metric(f'{agent_prefix}/Running_Intrinsic_Reward_Mean')
+    #df_run_std = extract_metric(f'{agent_prefix}/Running_Intrinsic_Reward_Std')
+    #df_norm_mean = extract_metric(f'{agent_prefix}/Intrinsic_Reward_Normalised_Mean')
+    df_norm_std = extract_metric(f'{agent_prefix}/Intrinsic_Reward_Normalised_Std')
+
+
+    if df_raw_mean is not None:
+        ax_intrinsic_stats.plot(
+            df_raw_mean['step'],
+            df_raw_mean['value'],
+            label="Raw mean",
+            color=color
+        )
+
+    if df_run_mean is not None:
+        ax_intrinsic_stats.plot(
+            df_run_mean['step'],
+            df_run_mean['value'],
+            linestyle="--",
+            label="Running mean",
+            color=color
+        )
+    """
+    """
+    if df_norm_std is not None:
+        ax_intrinsic_stats.plot(
+            df_norm_std['step'],
+            df_norm_std['value'],
+            linestyle=":",
+            label="Normalized std",
+            color=color
+        )
+    """
+    
+    df_influence = extract_metric(f'{agent_prefix}/Total_Full_Influence_Mean')
+    if df_influence is not None:
+        ax_intrinsic_stats.plot(df_influence['step'], df_influence['value'], color=color, alpha=0.8, label=agent_prefix)
+    
+    
 
 # --- GRAFIEK 5: DE ECHTE EXTRINSIEKE REWARD (OMGEVINGSPUNTEN) ---
 # We zoeken flexibel naar de reward-tag (omdat deze vaak niet per agent maar globaal wordt opgeslagen)
@@ -110,11 +154,19 @@ ax_ent.set_title('PPO Policy Entropy', fontweight='bold')
 ax_ent.grid(True, linestyle='--', alpha=0.5)
 ax_ent.legend()
 
+ax_intrinsic_stats.set_title(
+    "Intrinsic Reward Statistics",
+    fontweight='bold'
+)
+ax_intrinsic_stats.grid(True, linestyle='--', alpha=0.5)
+ax_intrinsic_stats.legend()
+
+ax_loss.set_ylim([-2, 70])
 ax_loss.set_title('PPO Network Losses', fontweight='bold')
 ax_loss.grid(True, linestyle='--', alpha=0.5)
 ax_loss.legend(ncol=2, fontsize='small')
 
-ax_ext.set_xlabel('Tijdstappen', fontsize=12)
+#ax_ext.set_xlabel('Tijdstappen', fontsize=12)
 ax_ext.set_ylabel('Echte Punten', fontsize=12)
 ax_ext.grid(True, linestyle='--', alpha=0.5)
 ax_ext.legend()

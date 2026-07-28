@@ -367,6 +367,7 @@ def train_ippo():
         with torch.inference_mode():
             # gemiddelde van 32 omgevingen
             mean_episode_reward = rewards_buffer.sum(dim=1).mean().item()
+            std_episode_reward = rewards_buffer.sum(dim=1).std().item()
             
         print(f"GEMIDDELDE EPISODIC RETURN (REWARDS): {mean_episode_reward:.2f}")
         print(f"======================================================\n")
@@ -382,7 +383,7 @@ def train_ippo():
             team_actions = torch.cat([actions_buffer[:, :i], actions_buffer[:, i + 1:]], dim=1)
             team_actions = team_actions.permute(0, 2, 1).contiguous()
             
-            print("team_actions: " + str(team_actions.shape))
+            #print("team_actions: " + str(team_actions.shape))
             
             agents[i].update4(
                 obs_buffer[:, i], 
@@ -425,6 +426,7 @@ def train_ippo():
             last_log_T = t_environment
             
             writer.add_scalar("Train/Mean_Episode_Return", mean_episode_reward, t_environment)
+            writer.add_scalar("Train/Std_Episode_Return", std_episode_reward, t_environment)
             
             
             for i in range(n_agents):
@@ -446,6 +448,17 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/World_Model_Loss", agent.last_wm_loss, t_environment)
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Mean", agent.last_intrinsic_raw_mean, t_environment)
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Raw_Std", agent.last_intrinsic_raw_std, t_environment)
+                    
+                    writer.add_scalar(f"Agent_{i}/Running_Intrinsic_Reward_Mean", agent.last_int_ms_mean, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Running_Intrinsic_Reward_Std", agent.last_int_ms_std, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Normalised_Mean", agent.last_normalised_intrinsic_mean, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Normalised_Std", agent.last_normalised_intrinsic_std, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Total_Rewards_Mean", agent.last_total_rewards_mean, t_environment)
+                    writer.add_scalar(f"Agent_{i}/Total_Rewards_Std", agent.last_total_rewards_std, t_environment)
+
+                    
+                    
+                    
                     writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
                     writer.add_scalar(f"Agent_{i}/MOA_Loss", agent.last_moa_loss, t_environment)
 

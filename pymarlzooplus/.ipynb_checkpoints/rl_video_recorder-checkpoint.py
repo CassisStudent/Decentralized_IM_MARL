@@ -1,7 +1,7 @@
 import imageio
 
 class RLVideoRecorder:
-    def __init__(self, env, name="moa"):
+    def __init__(self, env, name="biem"):
         self.env = env
         self.frames = []
         self.name = name

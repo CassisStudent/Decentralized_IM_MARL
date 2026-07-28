@@ -22,7 +22,7 @@ env_args: {
 
 
 
-t_max: 2500000
+t_max: 40000000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
@@ -38,9 +38,9 @@ use_cuda_cnn_modules: True # Use gpu. This is only for the CNN modules. If 'use_
 # specific for algorithm
 gamma: 0.99            #Same for both cleanRL and Pymarlzoo+
 lr: 0.00025            #"""the learning rate of the optimizer"""
-lr_critic: 0.0001
+lr_critic: 0.00025 #0.00001     #was 0.0001
 critic_type: "decentralized_critic"
-grad_norm_clip: 10 # Reduce magnitude of gradients above this L2 norm. Cleanrl uses small 0.5 value. We allow for bigger gradients, because of multiple agent settings.
+grad_norm_clip: 0.5 #Stond op 10 # Reduce magnitude of gradients above this L2 norm. Cleanrl uses small 0.5 value. We allow for bigger gradients, because of multiple agent settings.
 
 
 obs_agent_id: False
@@ -57,23 +57,28 @@ entropy_coef: 0.01 #called ent_coef: float = 0.01. It is same in cleanrl
 # I CHANGED THIS TO TRUE. CORRESPONDS probablly TO NORM_ADV IN CLEANRL
 standardise_returns: False  #"""Toggles advantages normalization""" #dit was true
 standardise_rewards: True # dit was false
-standardise_advantages: False #Staat niet in cleanrl/pymarlzooplus. Dit is nu op false gezet voor testing
+standardise_advantages: True #Staat niet in cleanrl/pymarlzooplus. Dit is nu op false gezet voor testing
+
+standardise_intrinsic_expl: True
+standardise_intrinsic_infl: True
+standardise_intrinsic: True
 
 name: "ippo_ns"
 use_rnn: True #Beter met True, maar veel langzamer
 
 #-------------------Intrinsic motivation-----------
 wm_epochs: 4 #epochs for training world models ensemble
-beta: 0.2
+alpha: 0 #0.3
+beta: 1
 
 #------------------MOA----------------------------
 lr_moa: 0.001
-moa_loss_weight: 10
+moa_loss_weight: 15
 
 #--------------------------Logging---------------------
 save_model: True # Save the models to disk
-save_model_interval: 50000 # Save models after this many timesteps
-log_interval: 50000 
+save_model_interval: 1000000 # Save models after this many timesteps
+log_interval: 200000 
 
 
 n_agents: -1 #Dit boeit volgens mij echt geen reet, maar moet RNNagent hebben blijkbaar.

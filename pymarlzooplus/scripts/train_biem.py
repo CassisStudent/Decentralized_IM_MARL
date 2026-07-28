@@ -10,7 +10,7 @@ import datetime
 
 from pymarlzooplus.envs import REGISTRY as env_REGISTRY
 from pymarlzooplus.rl_video_recorder import RLVideoRecorder
-from pymarlzooplus.learners.independent_ppo_moa_world_learner import IndependentPPOWorldLearnerMOA
+from pymarlzooplus.learners.ippo_social_world_learner import IPPOSocialWorldLearner
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -126,7 +126,7 @@ def train_ippo():
     if torch.multiprocessing.get_start_method(allow_none=True) is None:
         torch.multiprocessing.set_start_method('spawn')
     
-    run_string = "moa_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_string = "baseline_social_40mil_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     #-----------Logging-------------------:
     log_dir = os.path.join("results", "tb_logs", run_string)
     writer = SummaryWriter(log_dir=log_dir)
@@ -221,7 +221,7 @@ def train_ippo():
         
         print(f"Initializing Agent {i} on device: {target_device}")
         
-        learner = IndependentPPOWorldLearnerMOA(
+        learner = IPPOSocialWorldLearner(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
             args=args,
@@ -306,7 +306,7 @@ def train_ippo():
                 #obs_buffer[:, :, step] = obs.to(device)
                 
                 actions = actions_tensor.numpy() #.cpu().numpy()   # (B, n_agents)
-
+        
             torch.cuda.synchronize()
             total_inference_time += (time.perf_counter() - t_start_inf)
 
@@ -348,6 +348,7 @@ def train_ippo():
             
             if step % 250 == 0:
                 print(step)
+                #print(rewards_buffer[0, :])
             t += 1
 
             
@@ -455,9 +456,8 @@ def train_ippo():
                     writer.add_scalar(f"Agent_{i}/Intrinsic_Reward_Normalised_Std", agent.last_normalised_intrinsic_std, t_environment)
                     writer.add_scalar(f"Agent_{i}/Total_Rewards_Mean", agent.last_total_rewards_mean, t_environment)
                     writer.add_scalar(f"Agent_{i}/Total_Rewards_Std", agent.last_total_rewards_std, t_environment)
-
                     
-                    
+                    writer.add_scalar(f"Agent_{i}/Total_Full_Influence_Mean", agent.last_full_influence, t_environment)
                     
                     writer.add_scalar(f"Agent_{i}/Beta", agent.last_beta, t_environment)
                     writer.add_scalar(f"Agent_{i}/MOA_Loss", agent.last_moa_loss, t_environment)
@@ -504,6 +504,7 @@ def env_worker( worker_id, remote, env_fn, encoder_cfg, shared_obs, shared_rewar
             actions = data
             reward, terminated, env_info = env.step(actions)
             obs = env.get_obs()
+            
             
             #my_array = np.array(obs)
             #print(my_array.shape)

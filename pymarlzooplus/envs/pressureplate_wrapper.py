@@ -159,7 +159,7 @@ class _PressurePlateWrapper(MultiAgentEnv):
 
         # Keep only 'TimeLimit.truncated' in 'self._info'
         self._info = {"TimeLimit.truncated": self._info["TimeLimit.truncated"]}
-
+        
         # The episode ends when all agents have reached their positions ("terminations" are all True) or
         # "self._elapsed_steps >= self._max_episode_steps" is True
         done = all(terminations)

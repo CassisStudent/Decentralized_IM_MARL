@@ -169,6 +169,43 @@ class MOA_LSTM(nn.Module):
         # Sommeer over de 5 eigen acties (dim=0) om de marginale kansen te krijgen
         marginal_probs = (cf_probs_expanded * weight_logits).sum(dim=0)
         return marginal_probs # Shape: [Batch, Tijd, Partners, Acties_Partner]
+    
+    
+    def get_counterfactual_probs(self, moa_input_obs, moa_input_actions, n_actions, device):
+        # 1. Dupliceer de inputs 5 keer over een nieuwe as
+        buffer_size, max_seq_length, _ = moa_input_obs.shape
+        
+        counterfactual_preds = []
+        partner_actions_discrete = moa_input_actions[:, :, n_actions:] # [Batch, Tijd-1, Partners_Features]
+
+        cf_actions_eye = th.eye(n_actions, device=device)
+
+        # DE OFFICIËLE PAPER FOR-LOOP OVER ALLE 5 DE ACTIES
+        for i in range(n_actions):
+            # 1. Pak de i-de one-hot actie en expand naar [Batch, Tijd-1, 5]
+            my_cf_action = cf_actions_eye[i].view(1, 1, n_actions).expand(buffer_size, max_seq_length, -1)
+
+            # 2. Concateneer jouw tegenactie met de stabiele partner histories
+            cf_combined_actions = th.cat([my_cf_action, partner_actions_discrete], dim=-1)
+
+            # 3. Start deze specifieke counterfactual wereld met een schone lei (nullen) voor de LSTM
+            moa_hidden_cf = (
+                th.zeros(1, buffer_size, self.cell_size, device=device),
+                th.zeros(1, buffer_size, self.cell_size, device=device)
+            )
+
+            # 4. Pass deze specifieke wereld door de MOA
+            # Output shape: [Batch, Tijd-1, N_Partners, Action_Dim]
+            cf_logits, _ = self.forward(moa_input_obs, cf_combined_actions, moa_hidden_cf)
+            cf_probs = th.nn.functional.softmax(cf_logits, dim=-1)
+
+            # 5. Voeg een dimensie toe om ze dadelijk te kunnen stacken: [Batch, 1, Tijd-1, N_Partners, Action_Dim]
+            counterfactual_preds.append(cf_probs.unsqueeze(1))
+
+        # Smeed de 5 losse werelden samen tot de 5D-tensor uit de paper:
+        # Shape: [Batch, 5, Tijd-1, N_Partners, Action_Dim]
+        cf_counterfactual_probs = th.cat(counterfactual_preds, dim=1)
+        return cf_counterfactual_probs
 
 
     

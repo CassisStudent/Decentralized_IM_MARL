@@ -16,6 +16,8 @@ from pymarlzooplus.rl_video_recorder import RLVideoRecorder
 from pymarlzooplus.learners.independent_ppo_learner import IndependentPPOLearner
 from pymarlzooplus.learners.independent_ppo_world_learner import IndependentPPOWorldLearner
 from pymarlzooplus.learners.independent_ppo_moa_world_learner import IndependentPPOWorldLearnerMOA
+from pymarlzooplus.learners.ippo_social_world_learner import IPPOSocialWorldLearner
+
 from pymarlzooplus.utils.logging_setup import Logger
 
 from torch.utils.tensorboard import SummaryWriter
@@ -98,7 +100,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
         
     #args.device_cnn_modules = "cuda" if args.use_cuda_cnn_modules else "cpu"
     #th.backends.cudnn.benchmark = True
-    
+    _config["env_args"]["seed"] = 3000 
     
     # 1b. Create environment
     env = env_REGISTRY[_config["env"]](**_config["env_args"])
@@ -106,7 +108,8 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
     
     
     for i in range(args.buffer_size):
-        env_args[i]["seed"] += i
+        j = 100 + i
+        env_args[i]["seed"] += j
 
     env_info = env.get_env_info()
     
@@ -126,13 +129,13 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
 
     
     # 1c. Create videorecorder.
-    rl_video_recorder = RLVideoRecorder(env)
+    rl_video_recorder = RLVideoRecorder(env, name="biem_normalised40mil_20260725-021528")
 
     # 2. Create per-agent PPO learners
     agents = []
     
     for i in range(n_agents):
-        agent = IndependentPPOWorldLearnerMOA(
+        agent = IPPOSocialWorldLearner(
             obs_dimension=observation_dimension,
             act_dimension=n_actions,
             args=args,
@@ -157,7 +160,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
         obs, info = env.reset()
         done = False
         
-        obs_tensor = th.tensor(obs, dtype=th.float32).unsqueeze(0).to("cuda:1")
+        obs_tensor = th.tensor(obs, dtype=th.float32).unsqueeze(0).to("cpu")
         
         hidden_states = [agent.actor.init_hidden().to(agent.device) for agent in agents]
         episode_reward = 0
@@ -172,23 +175,25 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
                 for i in range(n_agents):
                     action, value, next_hidden = agents[i].select_action_logits(obs_tensor[0, i].unsqueeze(0), hidden_states[i])
                     hidden_states[i] = next_hidden
-                    actions.append(action)
+                    actions.append(action)#.cpu().item())
             
             reward, done, extra_info = env.step(actions)
             next_obs = env.get_obs()
             
-            obs_tensor = th.tensor(next_obs, dtype=th.float32).unsqueeze(0).to("cuda:1")
+            obs_tensor = th.tensor(next_obs, dtype=th.float32).unsqueeze(0).to("cpu")
             episode_reward += reward
             
             
             if step % 250 == 0:
                 print(step)
+                print(actions)
+
             
             step += 1
 
-        rl_video_recorder.save_video(episode)  
+        rl_video_recorder.save_video(episode+100)  
         rl_video_recorder.reset_frames_buffer()
-        print(f"Episode {episode+1} voltooid | Totale Extrinsieke Score: {episode_reward:.2f} | Stappen: {step}")
+        print(f"Episode {episode+100} voltooid | Totale Extrinsieke Score: {episode_reward:.2f} | Stappen: {step}")
     
     env.close()
     print(f"\nEvaluatie klaar! De video's (.mp4) staan klaar in de map: ....")
@@ -196,5 +201,5 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
 
 if __name__ == "__main__":
     # Pas dit aan naar de exacte map waar jouw .th bestanden staan
-    MODEL_PATH = "./results/models/baseline_20260707-173832/final" 
+    MODEL_PATH = "./results/models/biem_normalised40mil_20260725-021528/final" 
     evaluate_agents(MODEL_PATH, num_episodes=5)
