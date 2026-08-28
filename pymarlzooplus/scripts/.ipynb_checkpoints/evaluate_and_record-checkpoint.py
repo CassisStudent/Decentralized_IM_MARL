@@ -100,7 +100,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
         
     #args.device_cnn_modules = "cuda" if args.use_cuda_cnn_modules else "cpu"
     #th.backends.cudnn.benchmark = True
-    _config["env_args"]["seed"] = 3000 
+    _config["env_args"]["seed"] = 9000 
     
     # 1b. Create environment
     env = env_REGISTRY[_config["env"]](**_config["env_args"])
@@ -129,7 +129,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
 
     
     # 1c. Create videorecorder.
-    rl_video_recorder = RLVideoRecorder(env, name="biem_normalised40mil_20260725-021528")
+    rl_video_recorder = RLVideoRecorder(env, name="ablation_test")
 
     # 2. Create per-agent PPO learners
     agents = []
@@ -157,7 +157,7 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
     
     
     for episode in range(num_episodes):
-        obs, info = env.reset()
+        obs, info = env.reset(seed=9000+episode)
         done = False
         
         obs_tensor = th.tensor(obs, dtype=th.float32).unsqueeze(0).to("cpu")
@@ -201,5 +201,5 @@ def evaluate_agents(model_path, video_folder="eval_videos", num_episodes=5):
 
 if __name__ == "__main__":
     # Pas dit aan naar de exacte map waar jouw .th bestanden staan
-    MODEL_PATH = "./results/models/biem_normalised40mil_20260725-021528/final" 
+    MODEL_PATH = "./results/models/ablation_full_biem_9096_20260810-020711/final" 
     evaluate_agents(MODEL_PATH, num_episodes=5)

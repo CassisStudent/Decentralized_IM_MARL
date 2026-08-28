@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tensorboard.backend.event_processing import event_accumulator
 
-run_name = "baseline_10mil_20260727-225858"
+run_name = "ablation_full_biem_9096_20260810-020711"
 # 1. Zoek naar je logbestand
 log_dir = "../results/tb_logs/" + run_name
 event_files = glob.glob(os.path.join(log_dir, "**/events.out.tfevents.*"), recursive=True)
@@ -70,7 +70,10 @@ for idx, agent_prefix in enumerate(agents_found):
     if df_actor is not None:
         ax_loss.plot(df_actor['step'], df_actor['value'], color=color, linestyle='-', alpha=0.7, label=f'{agent_prefix} Actor')
     if df_critic is not None:
-        ax_loss.plot(df_critic['step'], df_critic['value'], color=color, linestyle='--', alpha=0.5, label=f'{agent_prefix} Critic')
+        df_critic['smoothed'] = df_critic['value'].ewm(alpha=0.05, adjust=False).mean()
+
+        ax_loss.plot(df_critic['step'], df_critic['value'], color=color, linestyle='--', alpha=0.15, label=f'{agent_prefix} Critic')
+        ax_loss.plot(df_critic['step'], df_critic['smoothed'], color=color, alpha=1.0, linewidth=2.0)
     
     #explained var
     df_var = extract_metric(f'{agent_prefix}/Explained_Variance')

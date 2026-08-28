@@ -31,7 +31,7 @@ class TimeLimitPressurePlate(GymTimeLimit):
             self.env.step(action),
             output_truncation_bool=False
         )
-
+        # VERANDERT NAAR SELF.ENV.STEP2. WEER TERUGZETTEN NAAR SELF.ENV.STEP ALS HET NIET WERKT
         self._elapsed_steps += 1
         infos["TimeLimit.truncated"] = False  # fake var, there is no truncation in PressurePlate
         if self._elapsed_steps >= self._max_episode_steps:
@@ -158,7 +158,7 @@ class _PressurePlateWrapper(MultiAgentEnv):
         reward = sum(rewards)
 
         # Keep only 'TimeLimit.truncated' in 'self._info'
-        self._info = {"TimeLimit.truncated": self._info["TimeLimit.truncated"]}
+        #self._info = {"TimeLimit.truncated": self._info["TimeLimit.truncated"]}
         
         # The episode ends when all agents have reached their positions ("terminations" are all True) or
         # "self._elapsed_steps >= self._max_episode_steps" is True

@@ -17,12 +17,12 @@ env_args: {
     key: "pressureplate-linear-4p-v0",
     time_limit: 500,
     render: True,
-    seed: 2024
+    seed: 9296
 }
 
 
 
-t_max: 40000000
+t_max: 100000000
 agent: "rnn_rome"
 hidden_dim: 64         # Size of hidden state for default rnn agent
 learner_log_interval: 2000 # Log training stats every {} timesteps
@@ -63,13 +63,13 @@ standardise_intrinsic_expl: True
 standardise_intrinsic_infl: True
 standardise_intrinsic: True
 
-name: "ippo_ns"
+name: "biem_ns"
 use_rnn: True #Beter met True, maar veel langzamer
 
 #-------------------Intrinsic motivation-----------
 wm_epochs: 4 #epochs for training world models ensemble
 alpha: 0 #0.3
-beta: 1
+beta: 0 #1
 
 #------------------MOA----------------------------
 lr_moa: 0.001
@@ -77,7 +77,7 @@ moa_loss_weight: 15
 
 #--------------------------Logging---------------------
 save_model: True # Save the models to disk
-save_model_interval: 1000000 # Save models after this many timesteps
+save_model_interval: 5000000 # Save models after this many timesteps
 log_interval: 200000 
 
 

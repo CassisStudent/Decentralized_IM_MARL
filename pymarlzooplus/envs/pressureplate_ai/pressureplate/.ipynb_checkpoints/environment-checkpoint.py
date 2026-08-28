@@ -110,8 +110,134 @@ class PressurePlate(gym.Env):
             self.np_random, self._seed = seeding.np_random(seed)
 
         return self._seed
-
+    
     def step(self, actions):
+        self.np_random.shuffle(self.agent_order)
+        
+        step_collisions = {f"agent_{i}_collision": "none" for i in range(self.n_agents)}
+
+        for i in self.agent_order:
+            #NOOP
+            if actions[i] == 4:
+                continue
+            
+            # cur position
+            proposed_pos = [self.agents[i].x, self.agents[i].y]
+
+            # actions: DOWN, UP, LEFT, RIGHT
+            if actions[i] == 0: proposed_pos[1] -= 1              #UP
+            elif actions[i] == 1: proposed_pos[1] += 1            #DOWN
+            elif actions[i] == 2: proposed_pos[0] -= 1            #LEFT
+            elif actions[i] == 3: proposed_pos[0] += 1            #RIGHT
+
+            collision_type = self._detect_collision_type(proposed_pos)
+            
+            if collision_type is None:
+                # Geen collision, update positie
+                if actions[i] == 0: self.agents[i].y -= 1
+                elif actions[i] == 1: self.agents[i].y += 1
+                elif actions[i] == 2: self.agents[i].x -= 1
+                elif actions[i] == 3: self.agents[i].x += 1
+            else:
+                # Sla het specifieke type collision op voor deze agent
+                step_collisions[f"agent_{i}_collision"] = collision_type
+                
+    
+        # check if a plate was pressed by the right agent
+        for i, plate in enumerate(self.plates):
+            if not plate.pressed:
+                if [plate.x, plate.y] == [self.agents[plate.id].x, self.agents[plate.id].y]:
+                    plate.pressed = True
+                    self.doors[plate.id].open = True
+
+            else:
+                if [plate.x, plate.y] != [self.agents[plate.id].x, self.agents[plate.id].y]:
+                    plate.pressed = False
+                    self.doors[plate.id].open = False
+
+        # Detecting goal completion
+        # if ALL agents have reached goal coords
+        r = []  # boolean of n_agents' positions
+        for agent in self.agents:
+            r.append([agent.x, agent.y] == [self.goal.x, self.goal.y])
+        got_goal = np.sum(r) > 0
+
+        if got_goal:
+            self.goal.achieved = True
+            
+        plates_info = self._get_plate_occupation_metrics()
+        
+        info_dict = {**step_collisions, **plates_info}
+
+        return (
+            self._get_obs(),
+            self._get_rewards(),
+            [self.goal.achieved] * self.n_agents,
+            [False] * self.n_agents,  # Just for compatibility with gymnasium
+            info_dict
+        )
+    
+    def _get_plate_occupation_metrics(self):
+        plates_info = {}
+        for plate in self.plates:
+            correct_agent = self.agents[plate.id]
+            
+            # Check A: Staat de JUISTE agent op de plaat?
+            is_correct = [plate.x, plate.y] == [correct_agent.x, correct_agent.y]
+            plates_info[f"agent_{plate.id}_on_correct_plate"] = int(is_correct)
+            
+            # Check B: Staat er een VERKEERDE agent op deze plaat te blokkeren?
+            is_blocked_by_wrong = False
+            for other_agent in self.agents:
+                if other_agent.id != plate.id:  # Niet de eigenaar van deze specifieke plaat
+                    if [plate.x, plate.y] == [other_agent.x, other_agent.y]:
+                        is_blocked_by_wrong = True
+                        break
+            plates_info[f"plate_{plate.id}_blocked_by_wrong_agent"] = int(is_blocked_by_wrong)
+
+        return plates_info
+    
+    
+    def _detect_collision_type(self, proposed_position):
+        """Need to check for collision with (1) grid edge, (2) walls, (3) closed doors (4) other agents"""
+        # Grid edge
+        if np.any([
+            proposed_position[0] < 0,
+            proposed_position[1] < 0,
+            proposed_position[0] >= self.grid_size[1],
+            proposed_position[1] >= self.grid_size[0]
+        ]):
+            return "wall"
+
+        # Walls
+        for wall in self.walls:
+            if proposed_position == [wall.x, wall.y]:
+                return "wall"
+
+        # Closed Door
+        for door in self.doors:
+            if not door.open:
+                for j in range(len(door.x)):
+                    if proposed_position == [door.x[j], door.y[j]]:
+                        return "door"
+
+        # Other agents
+        for other_agent in self.agents:
+            if proposed_position == [other_agent.x, other_agent.y]:
+                is_on_plate = False
+                for plate in self.plates:
+                    if [plate.x, plate.y] == [other_agent.x, other_agent.y]:
+                        is_on_plate = True
+                        break
+
+                if is_on_plate:
+                    return "partner_stationary" # Blokkeren van de drukplaat-bezetter!
+                else:
+                    return "partner_dynamic" # Botsing tijdens het navigeren
+
+        return None
+
+    def step2(self, actions):
         """obs, reward, done info"""
         self.np_random.shuffle(self.agent_order)
 

@@ -17,7 +17,7 @@ from pymarlzooplus.modules.world_model.moa import MOA_LSTM
 
 
 class IPPOSocialWorldLearner:
-    def __init__(self, obs_dimension, act_dimension, args, device="cpu"):#, policy, critic, args):
+    def __init__(self, obs_dimension, act_dimension, args, device="cuda:0"):#, policy, critic, args):
         self.args = args
         self.device = device if args.use_cuda else "cpu"
                 
@@ -154,6 +154,11 @@ class IPPOSocialWorldLearner:
         if available_actions is not None:
             logits[available_actions == 0] = -1e10  # mask invalid actions
         
+        ################
+        #probs = Categorical(logits=logits)
+        #if action is None:
+        #    action = probs.sample()
+        #####################
         action = th.argmax(logits, dim=-1).item()
     
         value = self.critic(obs)
@@ -219,8 +224,6 @@ class IPPOSocialWorldLearner:
         prev_actions_one_hot[:, 1:] = all_actions_one_hot[:, :-1]
         
         moa_input_obs = obs[:, :-1]
-        #moa_input_actions = all_actions_one_hot[:, :-1]
-        #moa_target_partners = team_actions[:, 1:] # Wat doen de partners op t+1? [batch, time, n_partners]
         moa_input_actions = prev_actions_one_hot[:, :-1]  # Input: a_{-1}(0), a₀, a₁, ..., a_T-2  <--- DIT IS DE FIX!
         moa_target_partners = team_actions[:, :-1]   # Target: De acties die partners NU doen op t (a₀, a₁, ..., a_T-1)
         
@@ -229,17 +232,9 @@ class IPPOSocialWorldLearner:
         # cut-off
         current_rnn_states = rnn_states[:, :-1]
         current_my_actions = actions_one_hot[:, :-1]
-        #all_current_actions = moa_input_actions
         
-        #next_obs_target = obs[:, 1:].detach()
         wm_mask = mask[:, :-1]
-        """
-        print("wm_mask " + str(wm_mask.shape))
-        print("rnn_states " + str(rnn_states.shape))
-        print("current_action " + str(current_actions.shape))
-        print("current_rnn_states " + str(current_rnn_states.shape))
-        """
-        
+
         if wm_mask.dim() == 2:
             wm_mask_3d = wm_mask.unsqueeze(-1) # -> [32, 499, 1]
         else:
@@ -248,7 +243,6 @@ class IPPOSocialWorldLearner:
         ##===============================
         # STAP 1B; MOA UPDATE loop
         #================================
-        
         chunk_size_moa = 10
         
         # training world model ensemble
@@ -280,14 +274,14 @@ class IPPOSocialWorldLearner:
             moa_loss_flat = th.cat(moa_loss_flat_list, dim=1)
 
             moa_loss = (moa_loss_flat * wm_mask_3d).sum() / wm_mask_3d.sum()
-            moa_loss = moa_loss * self.args.moa_loss_weight # scaling conform paper (bijv. 10.0). #DIT MOET NOG IN  DE TEST_ARGS KOMEN TE STAAN DAN....
-            
+            moa_loss = moa_loss * self.args.moa_loss_weight # scaling conform paper (bijv. 10.0)
             
             self.moa_optimiser.zero_grad()
             moa_loss.backward()
             th.nn.utils.clip_grad_norm_(self.moa.parameters(), max_norm=0.5) #VERANDER DE MAX_NORM NOG NAAR EEN  GOED GETAL?
             self.moa_optimiser.step()
 
+        #---------!!!!!!!!!!!!!!!--------GROTE VERANDERING: CLEAN EVAL HIDDEN---------!!!!!!-----------#
         #predicted next actions for world_model;
         with th.no_grad():
             current_logits, _ = self.moa(moa_input_obs, moa_input_actions)
@@ -295,9 +289,9 @@ class IPPOSocialWorldLearner:
             # Platpersen naar [Batch, Tijd-1, N_Partners * Action_Dim]
             moa_probs_flat = predicted_probs.view(buffer_size, max_seq_length - 1, -1).detach()
             
-            last_step_prob = moa_probs_flat[:, -1:, :] # Pak de allerlaatste stap [Batch, 1, Features]
+            #last_step_prob = moa_probs_flat[:, -1:, :] # Pak de allerlaatste stap [Batch, 1, Features]
             # Concateneer over de tijdsas (dim=1) -> Nieuwe shape is perfect [Batch, max_seq_length, Features]
-            moa_probs_flat_padded = th.cat([moa_probs_flat, last_step_prob], dim=1) 
+            #moa_probs_flat_padded = th.cat([moa_probs_flat, last_step_prob], dim=1) 
 
             
 
@@ -347,9 +341,10 @@ class IPPOSocialWorldLearner:
             predicted_probs_stabilised = predicted_probs / (th.sum(predicted_probs, dim=-1, keepdim=True) + 1e-10)
             
             kl_divergence = self.kl_div_pytorch(predicted_probs_stabilised, marginal_probs)
+            influence_reward_raw = self.kl_to_intrinsic_reward(kl_divergence, wm_mask) #GROTE AANPASSING HIER MET MASK
             
             full_influence = th.zeros_like(rewards)
-            full_influence[:, :-1] = self.kl_to_intrinsic_reward(kl_divergence, wm_mask)
+            full_influence[:, :-1] = influence_reward_raw
         
         # =====================================================================
         # STAP 2: BEREKEN EN NORMALISEER DE INTRINSIEKE REWARD
@@ -382,8 +377,6 @@ class IPPOSocialWorldLearner:
         # STAP 1H: LINEAIRE CURRICULUM DIMMER (Theoretische Stabilisator)
         #-------------------------------
         current_alpha, current_beta = self.dim_curriculum(t_environment)
-
-        
         
         total_rewards = rewards_scaled + current_alpha * full_intrinsic + current_beta * full_influence
         
@@ -555,7 +548,8 @@ class IPPOSocialWorldLearner:
         # Scheidingslijn na de volledige update van deze agent
         #print(f"[{self.device}] Adv Mean: {advantages.mean().item():.4f} | Adv Std: {advantages.std().item():.4f}")
     
-    def dim_curriculum(self, t_environment):
+    def dim_curriculum(self, t_environment, min_scale=0.05):
+        """
         if t_environment < 200000:
             current_alpha = 0.0
             current_beta = 0.0
@@ -570,6 +564,17 @@ class IPPOSocialWorldLearner:
             current_beta = self.args.beta
         
         current_alpha = self.args.alpha
+        """
+        # Progressie loopt van 1.0 (start van training) naar 0.0 (einde van training)
+        progress = 1.0 - (t_environment / self.args.t_max)
+        progress = max(0.0, progress)  # Veiligheidsmarge tegen overflow
+
+        # We zorgen dat de multiplier lineair afbouwt, maar vlakt op een bodemwaarde (min_scale)
+        scale_factor = max(min_scale, progress)
+
+        current_alpha = self.args.alpha * scale_factor
+        current_beta = self.args.beta * scale_factor
+        
         return current_alpha, current_beta
     
     def kl_to_intrinsic_reward(self, kl_divergence, wm_mask):

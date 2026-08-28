@@ -128,8 +128,8 @@ def train_ippo():
     
     run_string = "moa_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     #-----------Logging-------------------:
-    log_dir = os.path.join("results", "tb_logs", run_string)
-    writer = SummaryWriter(log_dir=log_dir)
+    #log_dir = os.path.join("results", "tb_logs", run_string)
+    #writer = SummaryWriter(log_dir=log_dir)
     
     # 1a. Get config (TODO LETS CHECK ON SEED)
     _config = read_config()
